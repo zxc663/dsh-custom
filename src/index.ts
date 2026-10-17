@@ -4,11 +4,11 @@
 //   ③ 装配读取：ctx.systemPrompt.assemble() → 分区归属 + renderPrompt 实际渲染（只读）
 //   ④ HTTP 数据面：/api/dsh-custom/{assembly,status}（webServer 服务；浏览器半 client.js 消费）
 // 设计档：D:/DeepSeek/dsh-plugin-dev/docs/design-specs/dsh-custom-prompt-design-20261017.md
-import { appendFileSync, copyFileSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { appendFileSync, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { createRequire } from 'node:module'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 // ── 路径与会话外定位 ──────────────────────────────────────────────
@@ -260,16 +260,20 @@ function recordHashes(root: string, files: string[]): void {
   }
 }
 
-export interface InjectSettings { enabled: boolean }
+export interface InjectSettings {
+  enabled: boolean
+  overrideEnabled: boolean
+}
 
 export function readInjectSettings(root: string): InjectSettings {
   const f = readCachedFile(join(root, 'settings.json'))
-  if (f === null) return { enabled: true } // 缺失=默认开（设计 §8.4）
+  if (f === null) return { enabled: true, overrideEnabled: false } // 缺失=纪律开/深改关（设计 §8.4）
   try {
-    return { enabled: (JSON.parse(f.text) as { injectEnabled?: unknown })?.injectEnabled !== false }
+    const j = JSON.parse(f.text) as { injectEnabled?: unknown; overrideEnabled?: unknown }
+    return { enabled: j?.injectEnabled !== false, overrideEnabled: j?.overrideEnabled === true }
   } catch (e) {
-    console.warn('[dsh-custom] settings.json 损坏，按默认（开）处理：', String((e as { message?: unknown })?.message ?? e))
-    return { enabled: true }
+    console.warn('[dsh-custom] settings.json 损坏，按默认（纪律开/深改关）处理：', String((e as { message?: unknown })?.message ?? e))
+    return { enabled: true, overrideEnabled: false }
   }
 }
 
@@ -415,12 +419,129 @@ export function disciplineTextFor(root: string, cwd?: string | null): string {
   return readCachedFile(join(root, 'discipline.md'))?.text ?? ''
 }
 
-export function saveSettings(root: string, patch: { injectEnabled?: unknown }): InjectSettings {
-  const next = { enabled: typeof patch.injectEnabled === 'boolean' ? patch.injectEnabled : readInjectSettings(root).enabled }
-  writeFileSync(join(root, 'settings.json'), JSON.stringify({ version: 1, injectEnabled: next.enabled }, null, 2) + '\n', 'utf8')
+export function saveSettings(root: string, patch: { injectEnabled?: unknown; overrideEnabled?: unknown }): InjectSettings {
+  const cur = readInjectSettings(root)
+  const next = {
+    enabled: typeof patch.injectEnabled === 'boolean' ? patch.injectEnabled : cur.enabled,
+    overrideEnabled: typeof patch.overrideEnabled === 'boolean' ? patch.overrideEnabled : cur.overrideEnabled,
+  }
+  writeFileSync(join(root, 'settings.json'), JSON.stringify({ version: 1, injectEnabled: next.enabled, overrideEnabled: next.overrideEnabled }, null, 2) + '\n', 'utf8')
   recordHashes(root, ['settings.json'])
-  audit(root, { kind: 'settings-saved', injectEnabled: next.enabled })
+  audit(root, { kind: 'settings-saved', injectEnabled: next.enabled, overrideEnabled: next.overrideEnabled })
   return next
+}
+
+// ── 深改接管（P2；#决策 2026-10-17 18:0x）：complete 整段替换 ──────────
+
+export const OVERRIDE_SECTION = 'dsh-custom:override'
+
+export interface OverrideState {
+  enabled: boolean
+  text: string
+  mtime: string | null
+}
+
+export function readOverride(root: string): OverrideState {
+  const f = readCachedFile(join(root, 'override.md'))
+  return {
+    enabled: readInjectSettings(root).overrideEnabled,
+    text: f?.text ?? '',
+    mtime: f === null ? null : new Date(f.mtimeMs).toISOString(),
+  }
+}
+
+/**
+ * #决策 2026-10-17 18:0x 干跑校验：候选文本对「当前变量表」按宿主插入语义预渲染——未知/畸形变量阻止保存；
+ * 已注册但离线无值的变量（如 {{model}}，请求期才解析）以占位值放行（设计 §2/§3 干跑口径）。
+ * @returns null=通过；否则错误信息（可直接回显给用户）。
+ */
+export function validateOverrideText(
+  text: string,
+  variables: Record<string, unknown> | null | undefined,
+  render?: ((assembly: unknown) => string) | null,
+): string | null {
+  const vars = variables ?? {}
+  if (typeof render === 'function') {
+    const filled: Record<string, unknown> = {}
+    for (const [k, v] of Object.entries(vars)) filled[k] = v === undefined ? `«${k}»` : v
+    try {
+      render({ sections: [{ name: OVERRIDE_SECTION, text }], contexts: [], tools: [], variables: filled })
+      return null
+    } catch (e) {
+      return String((e as { message?: unknown })?.message ?? e)
+    }
+  }
+  // 无 renderer 的兜底：按同语义做解析级检查（简单 {{name}} 组；未知名/畸形组阻止）
+  const re = /\{\{([^{}]*)\}\}/g
+  let m: RegExpExecArray | null
+  while ((m = re.exec(text)) !== null) {
+    const name = m[1] ?? ''
+    if (!/^[a-z][a-z0-9_]*$/i.test(name)) return `畸形变量引用「{{${name}}}」（应为 {{name}} 形式）`
+    if (!Object.hasOwn(vars, name)) {
+      const known = Object.keys(vars)
+      return `未知变量「{{${name}}}」；当前已注册变量：${known.length > 0 ? known.join('、') : '（无）'}`
+    }
+  }
+  return null
+}
+
+export interface BackupEntry {
+  name: string
+  files: string[]
+  hasOverride: boolean
+}
+
+export function listBackups(root: string): BackupEntry[] {
+  const b = join(root, 'backups')
+  if (!existsSync(b)) return []
+  let names: string[] = []
+  try {
+    names = readdirSync(b).filter((n) => /^[0-9A-Za-z._-]+$/.test(n))
+  } catch (e) {
+    console.warn('[dsh-custom] 快照目录读取失败：', String((e as { message?: unknown })?.message ?? e))
+    return []
+  }
+  return names
+    .map((name) => {
+      let files: string[] = []
+      try {
+        files = readdirSync(join(b, name))
+      } catch (e) {
+        console.warn(`[dsh-custom] 快照 ${name} 读取失败：`, String((e as { message?: unknown })?.message ?? e))
+      }
+      return { name, files, hasOverride: files.includes('override.md') }
+    })
+    .sort((x, y) => (x.name < y.name ? 1 : -1))
+    .slice(0, 100)
+}
+
+/** 恢复快照（限 backups 根内；恢复前先对当前状态拍快照，保证可逆）。 */
+export function restoreBackup(root: string, name: string): { restored: string[]; preRestoreSnapshot: string } {
+  const b = resolve(join(root, 'backups'))
+  const abs = resolve(b, name)
+  if (abs !== b && !abs.startsWith(b + sep)) throw new Error('非法快照路径（越出 backups 根）')
+  if (!existsSync(abs) || abs === b) throw new Error('快照不存在')
+  const files = readdirSync(abs).filter((f) => (TRACKED as string[]).includes(f))
+  if (files.length === 0) throw new Error('快照内无可恢复文件')
+  const pre = snapshot(root, 'pre-restore')
+  const restored: string[] = []
+  for (const f of files) {
+    copyFileSync(join(abs, f), join(root, f))
+    restored.push(f)
+  }
+  recordHashes(root, restored)
+  audit(root, { kind: 'backup-restored', name, files: restored })
+  return { restored, preRestoreSnapshot: pre }
+}
+
+/** 注册深改接管段（complete 独占：整段替换系统提示词段列表；工具/上下文照常）。 */
+export function registerOverride(svc: { section: (section: unknown) => () => void }, root: string): () => void {
+  return svc.section({
+    name: OVERRIDE_SECTION,
+    order: 0,
+    complete: true,
+    text: () => readOverride(root).text,
+  })
 }
 
 export function agentsCoexistence(home: string = resolveHome()): { exists: boolean; bytes: number | null; mtime: string | null } {
@@ -744,13 +865,28 @@ function readJsonBody(req: any, limit = 1024 * 1024): Promise<Record<string, unk
   })
 }
 
-export function makeApi(root: string, getService: () => { assemble: (context?: unknown) => Promise<unknown> } | null, stats: GuardStats, loader?: RendererLoader): (req: any, res: any) => void {
+export function makeApi(
+  root: string,
+  getService: () => { assemble: (context?: unknown) => Promise<unknown> } | null,
+  stats: GuardStats,
+  loader?: RendererLoader,
+  onAccess?: () => void,
+): (req: any, res: any) => void {
   const handlePut = (req: any, res: any, run: (body: Record<string, unknown>) => unknown): void => {
     readJsonBody(req)
       .then((body) => jsonResponse(res, 200, { ok: true, value: run(body) }))
       .catch((e: unknown) => jsonResponse(res, 400, { ok: false, error: String((e as { message?: unknown })?.message ?? e) }))
   }
+  const access = (): void => {
+    if (onAccess === undefined) return
+    try {
+      onAccess()
+    } catch (e) {
+      console.warn('[dsh-custom] 状态同步失败：', String((e as { message?: unknown })?.message ?? e))
+    }
+  }
   return (req: any, res: any) => {
+    access()
     const method = String(req?.method ?? 'GET').toUpperCase()
     const pathname = String(req?.url ?? '').split('?')[0].replace(/\/+$/, '') || '/'
     if (pathname === '/api/dsh-custom/assembly') {
@@ -827,6 +963,123 @@ export function makeApi(root: string, getService: () => { assemble: (context?: u
       jsonResponse(res, 200, { ok: true, value: agentsCoexistence() })
       return
     }
+    if (pathname === '/api/dsh-custom/override') {
+      if (method === 'GET') {
+        jsonResponse(res, 200, { ok: true, value: readOverride(root) })
+        return
+      }
+      if (method === 'PUT') {
+        const svc = getService()
+        if (!svc) {
+          jsonResponse(res, 503, { ok: false, error: 'systemPrompt 服务尚不可用（无法做干跑校验）' })
+          return
+        }
+        readJsonBody(req)
+          .then(async (body) => {
+            if (typeof body.text !== 'string') throw new Error('text 必须是字符串')
+            const asm = (await svc.assemble()) as { variables?: Record<string, unknown> } | null
+            let render: ((a: unknown) => string) | null = null
+            if (loader) {
+              try {
+                const mod = await loader()
+                if (mod !== null) render = (a: unknown) => String(mod.renderPrompt(a))
+              } catch (e) {
+                console.warn('[dsh-custom] 干跑渲染器不可用，改用解析级校验：', String((e as { message?: unknown })?.message ?? e))
+              }
+            }
+            const err = validateOverrideText(body.text, (asm?.variables ?? {}) as Record<string, unknown>, render)
+            if (err !== null) {
+              jsonResponse(res, 422, { ok: false, error: `干跑校验未通过：${err}` })
+              return
+            }
+            snapshot(root, 'save-override')
+            writeFileSync(join(root, 'override.md'), body.text, 'utf8')
+            recordHashes(root, ['override.md'])
+            audit(root, { kind: 'override-saved', bytes: Buffer.byteLength(body.text, 'utf8') })
+            access()
+            jsonResponse(res, 200, { ok: true, value: readOverride(root) })
+          })
+          .catch((e: unknown) => jsonResponse(res, 400, { ok: false, error: String((e as { message?: unknown })?.message ?? e) }))
+        return
+      }
+      jsonResponse(res, 405, { ok: false, error: 'method not allowed' })
+      return
+    }
+    if (pathname === '/api/dsh-custom/override/enable') {
+      if (method !== 'PUT') {
+        jsonResponse(res, 405, { ok: false, error: 'method not allowed' })
+        return
+      }
+      const svc = getService()
+      if (!svc) {
+        jsonResponse(res, 503, { ok: false, error: 'systemPrompt 服务尚不可用' })
+        return
+      }
+      readJsonBody(req)
+        .then(async (body) => {
+          if (body.enabled !== true) {
+            saveSettings(root, { overrideEnabled: false })
+            access()
+            audit(root, { kind: 'override-disabled' })
+            jsonResponse(res, 200, { ok: true, value: readOverride(root) })
+            return
+          }
+          if (readOverride(root).text.trim().length === 0) {
+            jsonResponse(res, 409, { ok: false, error: '接管文本为空：请先保存「取材于当前」的非空文本再启用（空文本不放行，避免模型收到空提示词）' })
+            return
+          }
+          saveSettings(root, { overrideEnabled: true })
+          access()
+          try {
+            await svc.assemble() // 启用探测：complete 独占校验（多于一个 complete=组装失败）
+            audit(root, { kind: 'override-enabled' })
+            jsonResponse(res, 200, { ok: true, value: readOverride(root) })
+          } catch (e) {
+            const msg = String((e as { message?: unknown })?.message ?? e)
+            saveSettings(root, { overrideEnabled: false })
+            access()
+            const m = /multiple complete prompt sections are active:\s*(.+)$/.exec(msg)
+            if (m !== null) {
+              const others = m[1]
+                .split(',')
+                .map((s) => s.trim().replace(/"/g, ''))
+                .filter((n) => n.length > 0 && n !== OVERRIDE_SECTION)
+              audit(root, { kind: 'override-conflict', others })
+              jsonResponse(res, 409, {
+                ok: false,
+                error: `互斥冲突：作用域内已存在其它 complete 接管段（${others.length > 0 ? others.join('、') : '未识别名单'}）——请先停用对方再启用本接管（已自动回退为关闭）`,
+                conflict: others,
+              })
+            } else {
+              audit(root, { kind: 'override-conflict', others: [msg.slice(0, 200)] })
+              jsonResponse(res, 409, { ok: false, error: `启用探测失败（已自动回退为关闭）：${msg}` })
+            }
+          }
+        })
+        .catch((e: unknown) => jsonResponse(res, 400, { ok: false, error: String((e as { message?: unknown })?.message ?? e) }))
+      return
+    }
+    if (pathname === '/api/dsh-custom/backups') {
+      if (method !== 'GET') {
+        jsonResponse(res, 405, { ok: false, error: 'method not allowed' })
+        return
+      }
+      jsonResponse(res, 200, { ok: true, value: { entries: listBackups(root) } })
+      return
+    }
+    if (pathname === '/api/dsh-custom/backups/restore') {
+      if (method !== 'PUT') {
+        jsonResponse(res, 405, { ok: false, error: 'method not allowed' })
+        return
+      }
+      handlePut(req, res, (body) => {
+        if (typeof body.name !== 'string') throw new Error('name 必须是字符串')
+        const result = restoreBackup(root, body.name)
+        access()
+        return result
+      })
+      return
+    }
     jsonResponse(res, 404, { ok: false, error: 'not found' })
   }
 }
@@ -844,11 +1097,45 @@ export function apply(ctx: any): () => void {
   )
   console.log('[dsh-custom] 护栏：模型对存储区写入＝拦截＋提示＋留痕（P0 保守子集；语义 b 确认放行随 P2）')
 
-  let service: { assemble: (context?: unknown) => Promise<unknown> } | null = null
+  let service: { assemble: (context?: unknown) => Promise<unknown>; section: (section: unknown) => () => void } | null = null
+
+  // P2：深改接管段动态注册（#决策 2026-10-17 18:0x：启用且文本非空才 wire；空文本不放行=防模型收到空提示词）
+  let overrideWired: (() => void) | null = null
+  const syncOverride = (): void => {
+    if (service === null) return
+    const shouldWire = readInjectSettings(root).overrideEnabled && readOverride(root).text.trim().length > 0
+    if (shouldWire && overrideWired === null) {
+      try {
+        overrideWired = registerOverride(service, root)
+      } catch (e) {
+        overrideWired = null
+        console.warn('[dsh-custom] 深改接管段注册失败：', String((e as { message?: unknown })?.message ?? e))
+      }
+    } else if (!shouldWire && overrideWired !== null) {
+      try {
+        overrideWired()
+      } catch (e) {
+        console.warn('[dsh-custom] 深改接管段注销失败：', String((e as { message?: unknown })?.message ?? e))
+      }
+      overrideWired = null
+    }
+  }
+  ctx.effect(() => () => {
+    if (overrideWired !== null) {
+      try {
+        overrideWired()
+      } catch (e) {
+        console.warn('[dsh-custom] 深改接管段清理失败：', String((e as { message?: unknown })?.message ?? e))
+      }
+      overrideWired = null
+    }
+  }, 'dsh-custom: override cleanup')
+
   ctx.inject(['systemPrompt'], (scoped: any) => {
     service = scoped.systemPrompt
     scoped.effect(() => registerDiscipline(scoped.systemPrompt, root), 'dsh-custom: discipline section')
     audit(root, { kind: 'sysprompt-attached', section: DISCIPLINE_SECTION, order: DISCIPLINE_ORDER })
+    syncOverride()
   })
 
   // P1b：按 agent 作用域注册同名段（遮蔽全局；命中工作区规则即覆盖，cwd 实时读取 ⇒ 位置转移自动跟随）
@@ -877,7 +1164,7 @@ export function apply(ctx: any): () => void {
   const rendererLoader = makeRendererLoader(ctx, root)
 
   ctx.inject(['webServer'], (scoped: any) => {
-    const api = makeApi(root, () => service, stats, rendererLoader)
+    const api = makeApi(root, () => service, stats, rendererLoader, syncOverride)
     scoped.effect(
       () => scoped.webServer.register({ kind: 'prefix', path: '/api/dsh-custom', handler: api }),
       'dsh-custom: api routes',

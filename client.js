@@ -114,6 +114,12 @@ window.__ModuleLoader__.load({
 			const [scopeRules, setScopeRules] = useState(null);
 			const [scopeSaving, setScopeSaving] = useState(false);
 			const [scopeMsg, setScopeMsg] = useState(null);
+			const [ov, setOv] = useState(null);
+			const [ovDraft, setOvDraft] = useState(null);
+			const [ovSaving, setOvSaving] = useState(false);
+			const [ovMsg, setOvMsg] = useState(null);
+			const [bk, setBk] = useState(null);
+			const [bkMsg, setBkMsg] = useState(null);
 			const [draft, setDraft] = useState(null);
 			const [saving, setSaving] = useState(false);
 			const [saveMsg, setSaveMsg] = useState(null);
@@ -124,13 +130,16 @@ window.__ModuleLoader__.load({
 				setLoading(true);
 				setError(null);
 				try {
-					const results = await Promise.all([api('assembly'), api('status'), api('discipline'), api('settings'), api('agents'), api('scope')]);
+					const results = await Promise.all([api('assembly'), api('status'), api('discipline'), api('settings'), api('agents'), api('scope'), api('override'), api('backups')]);
 					setView(results[0]);
 					setStatus(results[1]);
 					setDisc(results[2]);
 					setSettings(results[3]);
 					setAgents(results[4]);
 					setScopeRules(results[5].rules);
+					setOv(results[6]);
+					setOvDraft(results[6].text);
+					setBk(results[7].entries);
 					setDraft(results[2].sourceText);
 				} catch (e) {
 					setError(String((e && e.message) || e));
@@ -156,6 +165,42 @@ window.__ModuleLoader__.load({
 			const patchRule = (index, patch) => {
 				setScopeRules((prev) => (prev == null ? prev : prev.map((r, i) => (i === index ? Object.assign({}, r, patch) : r))));
 			};
+
+			const saveOverride = useCallback(async () => {
+				setOvSaving(true);
+				setOvMsg(null);
+				try {
+					const o = await api('override', { method: 'PUT', body: { text: ovDraft == null ? '' : ovDraft } });
+					setOv(o);
+					setOvDraft(o.text);
+					setOvMsg('已保存（干跑校验通过；保存前已快照）');
+				} catch (e) {
+					setOvMsg('保存失败：' + String((e && e.message) || e));
+				} finally {
+					setOvSaving(false);
+				}
+			}, [ovDraft]);
+			const toggleOverride = useCallback(async () => {
+				if (!ov) return;
+				setOvMsg(null);
+				try {
+					const o = await api('override/enable', { method: 'PUT', body: { enabled: !ov.enabled } });
+					setOv(o);
+					setOvMsg(o.enabled ? '已启用接管（模型将只看到编辑文本）' : '已停用接管（已恢复官方装配）');
+				} catch (e) {
+					setOvMsg('操作失败：' + String((e && e.message) || e));
+				}
+			}, [ov]);
+			const restoreSnap = useCallback(async (name) => {
+				setBkMsg(null);
+				try {
+					await api('backups/restore', { method: 'PUT', body: { name } });
+					setBkMsg('已回滚：' + name + '（回滚前状态已自动再快照）');
+					await load();
+				} catch (e) {
+					setBkMsg('回滚失败：' + String((e && e.message) || e));
+				}
+			}, [load]);
 
 			const saveDisc = useCallback(async () => {
 				setSaving(true);
@@ -245,6 +290,53 @@ window.__ModuleLoader__.load({
 					if (view.variables.length > 0) extra.push('变量：' + view.variables.join('、'));
 					children.push(h('div', { className: 'dshc_meta', key: 'sum' }, extra.join(' ｜ ')));
 				}
+			}
+
+			if (ov) {
+				children.push(
+					h('div', { className: 'dshc_header dshc_h3', key: 'h2b' },
+						h('h2', { className: 'dshc_title' }, '区二 · 深度自定义（接管官方提示词 · P2）'),
+						h('span', { className: 'dshc_spacer', style: { flex: 1 } }),
+						h('button', {
+							className: 'dshc_btn',
+							'data-on': ov.enabled,
+							onClick: () => void toggleOverride(),
+						}, ov.enabled ? '接管：已启用（点击停用）' : '接管：已关闭（点击启用）'),
+					),
+					h('div', { className: 'dshc_note', key: 'n2' }, ov.enabled
+						? '已接管：模型只看到下方文本（complete 独占——与其它 complete 类插件互斥；启用时已自动探测）。'
+						: '接管后模型只看到下方文本（工具/上下文照常）。complete 独占：启用时自动探测互斥（检测到其它 complete 类接管会拒绝启用）。'),
+					h('div', { className: 'dshc_toolbar', key: 'b2a' },
+						h('button', { className: 'dshc_btn', onClick: () => setOvDraft(view && view.rendered ? view.rendered : ovDraft) }, '取材于当前装配'),
+						h('button', { className: 'dshc_btn', onClick: () => void saveOverride(), disabled: ovSaving || ovDraft == null }, ovSaving ? '校验保存中…' : '保存（干跑校验＋快照）'),
+						ovMsg ? h('span', { className: 'dshc_meta' }, ovMsg) : null,
+					),
+					h('textarea', {
+						className: 'dshc_ta',
+						key: 'ovta',
+						style: { minHeight: 160 },
+						value: ovDraft == null ? '' : ovDraft,
+						placeholder: '接管文本（Markdown；可用已注册 {{变量}}；未知/畸形变量会被干跑校验阻止保存）',
+						spellCheck: false,
+						onChange: (e) => setOvDraft(e.target.value),
+					}),
+					h('div', { className: 'dshc_meta', key: 'bkh' }, '历史版本（存储快照；回滚前会自动对当前状态再快照，可逆）：'),
+					bk && bk.length > 0
+						? h('ul', { className: 'dshc_list', key: 'bklist' },
+								bk.slice(0, 10).map((b0) =>
+									h('li', { className: 'dshc_row', key: b0.name },
+										h('div', { className: 'dshc_rowHead' },
+											h('span', { className: 'dshc_name' }, b0.name),
+											h('span', { className: 'dshc_chars' }, b0.files.join('、') + '｜接管文本' + (b0.hasOverride ? '✓' : '✗')),
+											h('span', { className: 'dshc_spacer', style: { flex: 1 } }),
+											h('button', { className: 'dshc_btn', onClick: () => void restoreSnap(b0.name) }, '回滚'),
+										),
+									),
+								),
+							)
+						: h('div', { className: 'dshc_meta', key: 'bknone' }, '（暂无快照）'),
+					bkMsg ? h('div', { className: 'dshc_meta', key: 'bkm' }, bkMsg) : null,
+				);
 			}
 
 			children.push(

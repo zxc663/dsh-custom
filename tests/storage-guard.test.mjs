@@ -14,22 +14,26 @@ import {
   ensureStorage,
   guardDecision,
   hashOfFile,
+  listBackups,
   makeApi,
   makeRendererLoader,
   pickScopeRule,
   readAssembly,
   readDiscipline,
   readInjectSettings,
+  readOverride,
   readScope,
   registerDiscipline,
   renderPromptTolerant,
   resolveHome,
+  restoreBackup,
   saveDiscipline,
   saveScope,
   saveSettings,
   snapshot,
   squash,
   storageRoot,
+  validateOverrideText,
 } from '../src/index.ts'
 
 let pass = 0
@@ -384,6 +388,36 @@ console.log('M. HTTP 数据面（P1 端点：discipline/settings/agents）')
     check('PUT scope 200 且落盘', psc.code === 200 && readScope(apiTmp2).rules.length === 1)
     const pscBad = await callApi(api2, 'PUT', '/api/dsh-custom/scope', JSON.stringify({ rules: [{ path: 'D:\\ws', mode: 'fuzzy', text: 'X' }] }))
     check('PUT scope 非法 mode → 400', pscBad.code === 400)
+
+    // P2：深改接管端点
+    const go = await callApi(api2, 'GET', '/api/dsh-custom/override')
+    check('GET override 默认关且空', go.code === 200 && go.json.value.enabled === false && go.json.value.text === '')
+    const enNoText = await callApi(api2, 'PUT', '/api/dsh-custom/override/enable', JSON.stringify({ enabled: true }))
+    check('空文本启用 → 409', enNoText.code === 409 && enNoText.json.ok === false)
+    const po = await callApi(api2, 'PUT', '/api/dsh-custom/override', JSON.stringify({ text: '接管文本 {{model}}' }))
+    check('PUT override 合法（注册但无值变量放行）→ 200', po.code === 200 && readFileSync(join(apiTmp2, 'override.md'), 'utf8') === '接管文本 {{model}}')
+    const poBad = await callApi(api2, 'PUT', '/api/dsh-custom/override', JSON.stringify({ text: '密码 {{bogus}}' }))
+    check('PUT override 未知变量 → 422', poBad.code === 422 && String(poBad.json.error).includes('bogus'))
+    const enOk = await callApi(api2, 'PUT', '/api/dsh-custom/override/enable', JSON.stringify({ enabled: true }))
+    const go2 = await callApi(api2, 'GET', '/api/dsh-custom/override')
+    check('启用（探测通过）→ 200 且落档', enOk.code === 200 && go2.json.value.enabled === true)
+    const enOff = await callApi(api2, 'PUT', '/api/dsh-custom/override/enable', JSON.stringify({ enabled: false }))
+    check('停用 → 200 且落档', enOff.code === 200 && readOverride(apiTmp2).enabled === false)
+    const gb = await callApi(api2, 'GET', '/api/dsh-custom/backups')
+    check('GET backups 200（含快照）', gb.code === 200 && Array.isArray(gb.json.value.entries) && gb.json.value.entries.length >= 1)
+    const brBad = await callApi(api2, 'PUT', '/api/dsh-custom/backups/restore', JSON.stringify({ name: '..\\x' }))
+    check('restore 越界路径 → 400', brBad.code === 400)
+    const firstSnap = gb.json.value.entries[gb.json.value.entries.length - 1].name
+    const brOk = await callApi(api2, 'PUT', '/api/dsh-custom/backups/restore', JSON.stringify({ name: firstSnap }))
+    check('restore 合法快照 → 200', brOk.code === 200 && Array.isArray(brOk.json.value.restored))
+
+    // P2：互斥冲突路径（探测 assemble 抛 multiple complete）
+    const po2 = await callApi(api2, 'PUT', '/api/dsh-custom/override', JSON.stringify({ text: '冲突探测文本' }))
+    check('恢复后重存接管文本 → 200', po2.code === 200)
+    const apiConflict = makeApi(apiTmp2, () => ({ assemble: async () => { throw new Error('multiple complete prompt sections are active: "dsh-custom:override", "other:thing"') } }), { denied: 0, touched: 0 })
+    const enConflict = await callApi(apiConflict, 'PUT', '/api/dsh-custom/override/enable', JSON.stringify({ enabled: true }))
+    check('互斥冲突 → 409 且含对方段名', enConflict.code === 409 && Array.isArray(enConflict.json.conflict) && enConflict.json.conflict.includes('other:thing'))
+    check('冲突后自动回退为关闭', readInjectSettings(apiTmp2).overrideEnabled === false)
   } finally {
     rmSync(apiTmp2, { recursive: true, force: true })
   }
@@ -437,6 +471,69 @@ console.log('N. 作用域覆盖（匹配/优先级/解析合成）')
     check('拒绝后文件未被污染', readScope(baseN).rules.length === 1)
   } finally {
     rmSync(baseN, { recursive: true, force: true })
+  }
+}
+
+console.log('O. 深改接管（校验/快照恢复/设置）')
+{
+  // 干跑校验（无 renderer 的解析级兜底）
+  check('合法纯文本通过', validateOverrideText('你好', { model: undefined }, null) === null)
+  check('已注册但无值变量放行（{{model}}）', validateOverrideText('用 {{model}} 回答', { model: undefined }, null) === null)
+  check('未知变量阻止', String(validateOverrideText('{{bogus}}', { model: 'x' }, null)).includes('bogus'))
+  check('畸形变量阻止', String(validateOverrideText('{{a b}}', { model: 'x' }, null)).includes('畸形'))
+  check('无 renderer 时空变量表下的已知名放行失败=未知阻止', String(validateOverrideText('{{model}}', {}, null)).includes('未知'))
+  const strictStub = (asm) => {
+    const s = asm.sections[0].text
+    for (const m of s.matchAll(/\{\{([^{}]*)\}\}/g)) {
+      const name = m[1]
+      if (!/^[a-z][a-z0-9_]*$/i.test(name)) throw new Error('malformed prompt variable reference')
+      if (!Object.hasOwn(asm.variables, name)) throw new Error(`unknown prompt variable "{{${name}}}"`)
+      if (asm.variables[name] === undefined) throw new Error(`prompt variable "{{${name}}}" has no value`)
+    }
+    return s
+  }
+  check('render 路径：已知名（值 undefined 被占位）通过', validateOverrideText('用 {{model}}', { model: undefined }, strictStub) === null)
+  check('render 路径：未知名阻止', String(validateOverrideText('用 {{bogus}}', { model: 'x' }, strictStub)).includes('unknown'))
+
+  // 设置往返
+  const baseO = mkdtempSync(join(tmpdir(), 'dsh-custom-p2-'))
+  try {
+    ensureStorage(baseO)
+    check('overrideEnabled 默认关', readInjectSettings(baseO).overrideEnabled === false)
+    saveSettings(baseO, { overrideEnabled: true })
+    check('overrideEnabled 往返', readInjectSettings(baseO).overrideEnabled === true && readInjectSettings(baseO).enabled === true)
+    saveSettings(baseO, { injectEnabled: false })
+    check('两开关互不干扰', readInjectSettings(baseO).overrideEnabled === true && readInjectSettings(baseO).enabled === false)
+
+    // 快照与恢复
+    writeFileSync(join(baseO, 'override.md'), 'OV-原始', 'utf8')
+    const snap1 = snapshot(baseO, 'test-o')
+    writeFileSync(join(baseO, 'override.md'), 'OV-改写', 'utf8')
+    const backups = listBackups(baseO)
+    check('listBackups 含记录且标记 hasOverride', backups.length >= 1 && backups.some((b) => b.hasOverride))
+    const name1 = backups.find((b) => b.files.includes('override.md')).name
+    const restored = restoreBackup(baseO, name1)
+    check('恢复快照后内容逐字回滚', readFileSync(join(baseO, 'override.md'), 'utf8') === 'OV-原始' && restored.restored.includes('override.md'))
+    check('恢复前自动再拍快照（可逆）', listBackups(baseO).length >= backups.length + 1)
+    const auditO = readFileSync(join(baseO, 'audit.jsonl'), 'utf8')
+    check('恢复留痕 backup-restored', auditO.includes('backup-restored'))
+    let threwO = false
+    try {
+      restoreBackup(baseO, '..\\..\\etc')
+    } catch {
+      threwO = true
+    }
+    check('越界路径拒绝', threwO)
+    let threwO2 = false
+    try {
+      restoreBackup(baseO, 'no-such-snap')
+    } catch {
+      threwO2 = true
+    }
+    check('不存在快照拒绝', threwO2)
+    void snap1
+  } finally {
+    rmSync(baseO, { recursive: true, force: true })
   }
 }
 
