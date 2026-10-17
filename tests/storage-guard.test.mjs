@@ -10,18 +10,22 @@ import {
   collectStatus,
   containsPath,
   detectExternalChanges,
+  disciplineTextFor,
   ensureStorage,
   guardDecision,
   hashOfFile,
   makeApi,
   makeRendererLoader,
+  pickScopeRule,
   readAssembly,
   readDiscipline,
   readInjectSettings,
+  readScope,
   registerDiscipline,
   renderPromptTolerant,
   resolveHome,
   saveDiscipline,
+  saveScope,
   saveSettings,
   snapshot,
   squash,
@@ -374,8 +378,65 @@ console.log('M. HTTP 数据面（P1 端点：discipline/settings/agents）')
     check('GET agents 200', ga.code === 200 && ga.json.ok === true && typeof ga.json.value.exists === 'boolean')
     const m405 = await callApi(api2, 'POST', '/api/dsh-custom/discipline', '{}')
     check('discipline 非 GET/PUT → 405', m405.code === 405)
+    const gsc = await callApi(api2, 'GET', '/api/dsh-custom/scope')
+    check('GET scope 默认空', gsc.code === 200 && Array.isArray(gsc.json.value.rules) && gsc.json.value.rules.length === 0)
+    const psc = await callApi(api2, 'PUT', '/api/dsh-custom/scope', JSON.stringify({ rules: [{ path: 'D:\\ws', mode: 'prefix', text: 'X' }] }))
+    check('PUT scope 200 且落盘', psc.code === 200 && readScope(apiTmp2).rules.length === 1)
+    const pscBad = await callApi(api2, 'PUT', '/api/dsh-custom/scope', JSON.stringify({ rules: [{ path: 'D:\\ws', mode: 'fuzzy', text: 'X' }] }))
+    check('PUT scope 非法 mode → 400', pscBad.code === 400)
   } finally {
     rmSync(apiTmp2, { recursive: true, force: true })
+  }
+}
+
+console.log('N. 作用域覆盖（匹配/优先级/解析合成）')
+{
+  const R = (path, mode, text) => ({ path, mode, text })
+  check('exact 命中', pickScopeRule([R('D:\\ws\\a', 'exact', 'A')], 'D:\\ws\\a') !== null)
+  check('exact 大小写/斜杠归一命中', pickScopeRule([R('d:/WS/A', 'exact', 'A')], 'D:\\ws\\a') !== null)
+  check('prefix 命中子路径', pickScopeRule([R('D:\\ws', 'prefix', 'P')], 'D:\\ws\\a\\b') !== null)
+  check('contains 命中', pickScopeRule([R('ws\\a', 'contains', 'C')], 'D:\\x\\ws\\a\\y') !== null)
+  check('regex 命中（i 标志）', pickScopeRule([R('proj-\\d+$', 'regex', 'R')], 'D:\\ws\\PROJ-42') !== null)
+  check('不命中返回 null', pickScopeRule([R('D:\\other', 'prefix', 'X')], 'D:\\ws\\a') === null)
+  const pickA = pickScopeRule([R('D:', 'prefix', 'P-long'), R('D:\\ws\\a', 'exact', 'EXACT'), R('D:\\ws', 'prefix', 'P')], 'D:\\ws\\a')
+  check('越具体越优先（exact > prefix）', pickA !== null && pickA.text === 'EXACT')
+  const pickB = pickScopeRule([R('D:\\ws', 'prefix', 'P-short'), R('D:\\ws\\a', 'prefix', 'P-long')], 'D:\\ws\\a\\b')
+  check('同级取更长 prefix', pickB !== null && pickB.text === 'P-long')
+  check(
+    '空正文规则可命中（=该位置关闭）',
+    (() => {
+      const r = pickScopeRule([R('D:\\ws', 'prefix', '')], 'D:\\ws\\a')
+      return r !== null && r.text === ''
+    })(),
+  )
+  check('非法 regex 跳过不炸', pickScopeRule([R('[', 'regex', 'X'), R('D:', 'prefix', 'P')], 'D:\\ws') !== null)
+
+  const baseN = mkdtempSync(join(tmpdir(), 'dsh-custom-p1b-'))
+  try {
+    ensureStorage(baseN)
+    saveDiscipline(baseN, '全局纪律')
+    check('无规则 → 全局文本', disciplineTextFor(baseN, 'D:\\ws\\a') === '全局纪律')
+    saveScope(baseN, [{ path: 'D:\\ws', mode: 'prefix', text: '工作区纪律' }])
+    check('命中规则 → 覆盖文本', disciplineTextFor(baseN, 'D:\\ws\\a') === '工作区纪律')
+    check('cwd 缺省 → 全局文本', disciplineTextFor(baseN, null) === '全局纪律')
+    saveScope(baseN, [{ path: 'D:\\ws', mode: 'prefix', text: '' }])
+    check('规则空文本 → 该位置关（空）', disciplineTextFor(baseN, 'D:\\ws\\a') === '')
+    check('关位置不影响别处', disciplineTextFor(baseN, 'D:\\other') === '全局纪律')
+    saveSettings(baseN, { injectEnabled: false })
+    check('总开关关 → 一律空', disciplineTextFor(baseN, 'D:\\ws\\a') === '' && disciplineTextFor(baseN, 'D:\\other') === '')
+    saveSettings(baseN, { injectEnabled: true })
+    const auditN = readFileSync(join(baseN, 'audit.jsonl'), 'utf8')
+    check('scope 保存留痕+快照', auditN.includes('scope-saved') && readdirSync(join(baseN, 'backups')).length >= 1)
+    let threw = false
+    try {
+      saveScope(baseN, [{ path: '', mode: 'exact', text: 'x' }])
+    } catch {
+      threw = true
+    }
+    check('非法规则拒绝保存', threw)
+    check('拒绝后文件未被污染', readScope(baseN).rules.length === 1)
+  } finally {
+    rmSync(baseN, { recursive: true, force: true })
   }
 }
 

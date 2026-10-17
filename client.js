@@ -44,6 +44,9 @@ window.__ModuleLoader__.load({
 			'.dshc_ta{border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-3);border-radius:10px;padding:10px 12px;min-height:120px;width:100%;box-sizing:border-box;color:var(--dsw-alias-label-primary);font-family:var(--ds-font-family-code,ui-monospace,monospace);font-size:12px;line-height:18px;resize:vertical}',
 			'.dshc_btn[data-on=true]{border-color:var(--dsw-alias-state-success-primary);color:var(--dsw-alias-state-success-primary)}',
 			'.dshc_h3{border-top:1px solid var(--dsw-alias-border-l2);padding-top:12px;margin-top:4px}',
+			'.dshc_in{border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-3);border-radius:6px;padding:4px 8px;color:var(--dsw-alias-label-primary);font:inherit;font-size:12px;min-width:0;box-sizing:border-box}',
+			'.dshc_rule{display:flex;gap:8px;align-items:flex-start}',
+			'.dshc_rule .dshc_ta{min-height:54px}',
 		].join('\n');
 		const CSS_TAG_ID = PLUGIN_ID + '/tab.css';
 		if (typeof document !== 'undefined' && document.querySelector('style[data-plugin-css=' + JSON.stringify(CSS_TAG_ID) + ']') === null) {
@@ -108,6 +111,9 @@ window.__ModuleLoader__.load({
 			const [disc, setDisc] = useState(null);
 			const [settings, setSettings] = useState(null);
 			const [agents, setAgents] = useState(null);
+			const [scopeRules, setScopeRules] = useState(null);
+			const [scopeSaving, setScopeSaving] = useState(false);
+			const [scopeMsg, setScopeMsg] = useState(null);
 			const [draft, setDraft] = useState(null);
 			const [saving, setSaving] = useState(false);
 			const [saveMsg, setSaveMsg] = useState(null);
@@ -118,12 +124,13 @@ window.__ModuleLoader__.load({
 				setLoading(true);
 				setError(null);
 				try {
-					const results = await Promise.all([api('assembly'), api('status'), api('discipline'), api('settings'), api('agents')]);
+					const results = await Promise.all([api('assembly'), api('status'), api('discipline'), api('settings'), api('agents'), api('scope')]);
 					setView(results[0]);
 					setStatus(results[1]);
 					setDisc(results[2]);
 					setSettings(results[3]);
 					setAgents(results[4]);
+					setScopeRules(results[5].rules);
 					setDraft(results[2].sourceText);
 				} catch (e) {
 					setError(String((e && e.message) || e));
@@ -132,6 +139,23 @@ window.__ModuleLoader__.load({
 				}
 			}, []);
 			useEffect(() => { void load(); }, [load]);
+
+			const saveScopeDraft = useCallback(async () => {
+				setScopeSaving(true);
+				setScopeMsg(null);
+				try {
+					const s = await api('scope', { method: 'PUT', body: { rules: scopeRules == null ? [] : scopeRules } });
+					setScopeRules(s.rules);
+					setScopeMsg('已保存（保存前已生成快照）');
+				} catch (e) {
+					setScopeMsg('保存失败：' + String((e && e.message) || e));
+				} finally {
+					setScopeSaving(false);
+				}
+			}, [scopeRules]);
+			const patchRule = (index, patch) => {
+				setScopeRules((prev) => (prev == null ? prev : prev.map((r, i) => (i === index ? Object.assign({}, r, patch) : r))));
+			};
 
 			const saveDisc = useCallback(async () => {
 				setSaving(true);
@@ -247,7 +271,7 @@ window.__ModuleLoader__.load({
 							: '共存提示：未检测到 $DSH_HOME/AGENTS.md。')
 					: null,
 				h('div', { className: 'dshc_meta', key: 'prevL' },
-					'预览（保存后模型将看到的前 8 行）：',
+					'全局默认（无匹配工作区规则时生效）｜预览（保存后模型将看到的前 8 行）：',
 					h('pre', { className: 'dshc_pre', key: 'prevP' }, String(draft || '').split('\n').slice(0, 8).join('\n') || '（空）'),
 				),
 				h('textarea', {
@@ -265,6 +289,43 @@ window.__ModuleLoader__.load({
 					h('span', { className: 'dshc_meta' }, disc && disc.mtime ? '纪律档案 mtime ' + fmtTime(disc.mtime) : '纪律档案不存在'),
 				),
 			);
+
+			if (scopeRules) {
+				const MODE_LABEL = { exact: '完全一致', prefix: '前缀', contains: '包含', regex: '正则' };
+				const ruleRows = scopeRules.map((r, i) =>
+					h('div', { className: 'dshc_rule', key: 'sr' + String(i) },
+						h('select', { className: 'dshc_in', value: r.mode, onChange: (e) => patchRule(i, { mode: e.target.value }) },
+							['exact', 'prefix', 'contains', 'regex'].map((m) => h('option', { value: m, key: m }, MODE_LABEL[m])),
+						),
+						h('input', {
+							className: 'dshc_in',
+							style: { flex: 1 },
+							value: r.path,
+							placeholder: '工作区路径（如 D:\\proj）',
+							spellCheck: false,
+							onChange: (e) => patchRule(i, { path: e.target.value }),
+						}),
+						h('textarea', {
+							className: 'dshc_ta',
+							style: { flex: 1.2 },
+							value: r.text,
+							placeholder: '文本（空=该位置关闭）',
+							spellCheck: false,
+							onChange: (e) => patchRule(i, { text: e.target.value }),
+						}),
+						h('button', { className: 'dshc_btn', onClick: () => setScopeRules((prev) => prev.filter((_, j) => j !== i)) }, '删除'),
+					),
+				);
+				children.push(
+					h('div', { className: 'dshc_meta', key: 'scHead' }, '作用域覆盖（工作区规则；越具体越优先：完全一致＞前缀＞包含＞正则；空正文=该位置关闭）：'),
+					...ruleRows,
+					h('div', { className: 'dshc_toolbar', key: 'scBar' },
+						h('button', { className: 'dshc_btn', onClick: () => setScopeRules((prev) => (prev || []).concat([{ path: '', mode: 'prefix', text: '' }])) }, '＋ 添加规则'),
+						h('button', { className: 'dshc_btn', onClick: () => void saveScopeDraft(), disabled: scopeSaving }, scopeSaving ? '保存中…' : '保存规则（快照＋落盘）'),
+						scopeMsg ? h('span', { className: 'dshc_meta' }, scopeMsg) : null,
+					),
+				);
+			}
 
 			if (status) {
 				const rows = [

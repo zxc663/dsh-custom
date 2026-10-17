@@ -301,6 +301,120 @@ export function saveDiscipline(root: string, text: string): DisciplineState {
   return readDiscipline(root)
 }
 
+// ── 作用域覆盖（P1b；#决策 2026-10-17 17:2x）：全局默认＋单工作区可覆盖 ──
+// 匹配口径复用近邻成熟裁定：完全一致/前缀/包含/正则；越具体越优先；空正文=在该位置关闭。
+
+export const SCOPE_MODES = ['exact', 'prefix', 'contains', 'regex'] as const
+export type ScopeMode = (typeof SCOPE_MODES)[number]
+export interface ScopeRule {
+  path: string
+  mode: ScopeMode
+  text: string
+}
+export interface ScopeState {
+  version: number
+  rules: ScopeRule[]
+}
+
+function ruleValid(r: unknown): r is ScopeRule {
+  const rule = r as Partial<ScopeRule> | null
+  return (
+    rule !== null &&
+    typeof rule === 'object' &&
+    typeof rule.path === 'string' &&
+    rule.path.length > 0 &&
+    typeof rule.mode === 'string' &&
+    (SCOPE_MODES as readonly string[]).includes(rule.mode) &&
+    typeof rule.text === 'string'
+  )
+}
+
+export function readScope(root: string): ScopeState {
+  const f = readCachedFile(join(root, 'scope.json'))
+  if (f === null) return { version: 1, rules: [] }
+  try {
+    const j = JSON.parse(f.text) as { rules?: unknown }
+    const raw = Array.isArray(j?.rules) ? j.rules : []
+    const rules = raw.filter((r) => {
+      const ok = ruleValid(r)
+      if (!ok) console.warn('[dsh-custom] scope.json 含无效规则，已跳过：', JSON.stringify(r).slice(0, 120))
+      return ok
+    })
+    return { version: 1, rules }
+  } catch (e) {
+    console.warn('[dsh-custom] scope.json 损坏，按空规则处理：', String((e as { message?: unknown })?.message ?? e))
+    return { version: 1, rules: [] }
+  }
+}
+
+export function saveScope(root: string, rules: unknown): ScopeState {
+  if (!Array.isArray(rules)) throw new Error('rules 必须是数组')
+  const normalized = rules.map((r, i) => {
+    if (!ruleValid(r)) throw new Error(`第 ${String(i + 1)} 条规则不合法（path 非空串；mode ∈ exact/prefix/contains/regex；text 为字符串）`)
+    if (r.mode === 'regex') {
+      try {
+        new RegExp(r.path)
+      } catch {
+        throw new Error(`第 ${String(i + 1)} 条规则 regex 非法：${r.path}`)
+      }
+    }
+    return { path: r.path, mode: r.mode, text: r.text }
+  })
+  snapshot(root, 'save-scope')
+  writeFileSync(join(root, 'scope.json'), JSON.stringify({ version: 1, rules: normalized }, null, 2) + '\n', 'utf8')
+  recordHashes(root, ['scope.json'])
+  audit(root, { kind: 'scope-saved', rules: normalized.length })
+  return { version: 1, rules: normalized }
+}
+
+const SCOPE_RANK: Record<ScopeMode, number> = { exact: 0, prefix: 1, contains: 2, regex: 3 }
+
+/** 取最具体命中规则（exact > prefix > contains > regex；同级取更长者；再同级取先列者）。 */
+export function pickScopeRule(rules: ScopeRule[], cwd: string | null | undefined): ScopeRule | null {
+  if (rules.length === 0 || typeof cwd !== 'string' || cwd.length === 0) return null
+  const c = squash(cwd)
+  let best: { rule: ScopeRule; rank: number; len: number } | null = null
+  for (const rule of rules) {
+    if (!ruleValid(rule)) continue
+    let hit = false
+    let len = 0
+    if (rule.mode === 'exact') {
+      hit = c === squash(rule.path)
+      len = rule.path.length
+    } else if (rule.mode === 'prefix') {
+      hit = c.startsWith(squash(rule.path))
+      len = rule.path.length
+    } else if (rule.mode === 'contains') {
+      hit = c.includes(squash(rule.path))
+      len = rule.path.length
+    } else {
+      try {
+        hit = new RegExp(rule.path, 'i').test(cwd)
+        len = rule.path.length
+      } catch (e) {
+        console.warn('[dsh-custom] 作用域 regex 无效，已跳过：', rule.path, String((e as { message?: unknown })?.message ?? e))
+        continue
+      }
+    }
+    if (!hit) continue
+    const rank = SCOPE_RANK[rule.mode]
+    if (best === null || rank < best.rank || (rank === best.rank && len > best.len)) best = { rule, rank, len }
+  }
+  return best === null ? null : best.rule
+}
+
+/**
+ * 纪律注入文本解析（#决策 2026-10-17 P1b）：总开关关 → ''；命中工作区规则 → 规则文本（可空=该位置关）；
+ * 无命中 → 全局默认（discipline.md）。cwd 缺省（全局引用）时不走规则。每次组装求值（热生效）。
+ */
+export function disciplineTextFor(root: string, cwd?: string | null): string {
+  detectExternalChanges(root) // 组装前哈希对照（设计 §4）
+  if (!readInjectSettings(root).enabled) return ''
+  const rule = pickScopeRule(readScope(root).rules, cwd ?? null)
+  if (rule !== null) return rule.text
+  return readCachedFile(join(root, 'discipline.md'))?.text ?? ''
+}
+
 export function saveSettings(root: string, patch: { injectEnabled?: unknown }): InjectSettings {
   const next = { enabled: typeof patch.injectEnabled === 'boolean' ? patch.injectEnabled : readInjectSettings(root).enabled }
   writeFileSync(join(root, 'settings.json'), JSON.stringify({ version: 1, injectEnabled: next.enabled }, null, 2) + '\n', 'utf8')
@@ -324,13 +438,26 @@ export function agentsCoexistence(home: string = resolveHome()): { exists: boole
 /**
  * 注册纪律前置段（system 层，order −2000 ⇒ 先于全官方面）。text 为函数：宿主每次组装时求值
  * （=热生效，改完无需推送；关/空 → 空文本，渲染期自动剔除 ⇒ 模型只见纯宿主提示词）。
+ * 本函数注册「全局默认」层；工作区覆盖由 apply 中按 agent 作用域注册的同名段遮蔽（P1b）。
  */
 export function registerDiscipline(svc: { section: (section: unknown) => () => void }, root: string): () => void {
   return svc.section({
     name: DISCIPLINE_SECTION,
     order: DISCIPLINE_ORDER,
     interpolate: false,
-    text: () => readDiscipline(root).text,
+    text: () => disciplineTextFor(root, null),
+  })
+}
+
+/** 按 agent 作用域注册同名纪律段（遮蔽全局；cwd 每次组装实时读取 ⇒ 位置转移自动跟随）。 */
+export function registerDisciplineForAgent(agent: { ctx: { inject: (svcs: string[], cb: (scope: any) => void) => any }; session?: { header?: { cwd?: string } } }, root: string): unknown {
+  return agent.ctx.inject(['systemPrompt'], (scope: any) => {
+    scope.systemPrompt.section({
+      name: DISCIPLINE_SECTION,
+      order: DISCIPLINE_ORDER,
+      interpolate: false,
+      text: () => disciplineTextFor(root, agent?.session?.header?.cwd ?? null),
+    })
   })
 }
 
@@ -680,6 +807,18 @@ export function makeApi(root: string, getService: () => { assemble: (context?: u
       jsonResponse(res, 405, { ok: false, error: 'method not allowed' })
       return
     }
+    if (pathname === '/api/dsh-custom/scope') {
+      if (method === 'GET') {
+        jsonResponse(res, 200, { ok: true, value: readScope(root) })
+        return
+      }
+      if (method === 'PUT') {
+        handlePut(req, res, (body) => saveScope(root, body.rules))
+        return
+      }
+      jsonResponse(res, 405, { ok: false, error: 'method not allowed' })
+      return
+    }
     if (pathname === '/api/dsh-custom/agents') {
       if (method !== 'GET') {
         jsonResponse(res, 405, { ok: false, error: 'method not allowed' })
@@ -710,6 +849,29 @@ export function apply(ctx: any): () => void {
     service = scoped.systemPrompt
     scoped.effect(() => registerDiscipline(scoped.systemPrompt, root), 'dsh-custom: discipline section')
     audit(root, { kind: 'sysprompt-attached', section: DISCIPLINE_SECTION, order: DISCIPLINE_ORDER })
+  })
+
+  // P1b：按 agent 作用域注册同名段（遮蔽全局；命中工作区规则即覆盖，cwd 实时读取 ⇒ 位置转移自动跟随）
+  const scopedDisciplineFibers = new Map<unknown, unknown>()
+  const installScopedDiscipline = (agent: any): void => {
+    if (scopedDisciplineFibers.has(agent)) return
+    try {
+      scopedDisciplineFibers.set(agent, registerDisciplineForAgent(agent, root))
+    } catch (e) {
+      console.warn('[dsh-custom] 作用域纪律段注册失败：', String((e as { message?: unknown })?.message ?? e))
+    }
+  }
+  ctx.inject(['agents'], (agentsCtx: any) => {
+    for (const agent of agentsCtx.agents.list()) installScopedDiscipline(agent)
+    agentsCtx.on('agent/created', ({ agent }: { agent: unknown }) => installScopedDiscipline(agent))
+    agentsCtx.on('agent/disposed', ({ agent }: { agent: unknown }) => {
+      const fiber = scopedDisciplineFibers.get(agent)
+      if (fiber === undefined) return
+      scopedDisciplineFibers.delete(agent)
+      Promise.resolve((fiber as { dispose: () => unknown }).dispose()).catch((e: unknown) => {
+        console.warn('[dsh-custom] 作用域纪律段清理失败：', String((e as { message?: unknown })?.message ?? e))
+      })
+    })
   })
 
   const rendererLoader = makeRendererLoader(ctx, root)
