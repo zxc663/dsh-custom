@@ -9,13 +9,23 @@
   },
   "files": [
     "lib",
+    "client.js",
     "cordis.patch.yml",
     "LICENSE",
     "README.md"
   ],
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./client.js",
+    "./lib/*": "./lib/*",
+    "./package.json": "./package.json"
+  },
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web"
     }
   },
   "scripts": {

@@ -1,9 +1,10 @@
 // dsh-custom（「DSH自定义」）P0 运行时半：
 //   ① 存储骨架：$DSH_HOME/dsh-custom/（discipline.md / override.md / scope.json / meta.json / backups/ / audit.jsonl）
 //   ② 防静默改写护栏（语义 b 的 P0 保守子集：拦截＋提示＋留痕；确认放行随 P2）
-//   ③ 装配读取：ctx.systemPrompt.assemble() → 分区归属（官方/外挂）+ 实际渲染文本（只读）
+//   ③ 装配读取：ctx.systemPrompt.assemble() → 分区归属 + renderPrompt 实际渲染（只读）
+//   ④ HTTP 数据面：/api/dsh-custom/{assembly,status}（webServer 服务；浏览器半 client.js 消费）
 // 设计档：D:/DeepSeek/dsh-plugin-dev/docs/design-specs/dsh-custom-prompt-design-20261017.md
-import { appendFileSync, copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { appendFileSync, copyFileSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
@@ -197,32 +198,60 @@ export function snapshot(root: string, reason: string): string {
 
 // ── 装配读取（只读视图数据面）────────────────────────────────────
 
-export const OFFICIAL_ORDERS = new Set([
-  -1000, 0, 500, 600, 800, 900, 1000, 1010, 1100, 1200, 1300, 1400, 1500, 1600, 1700,
-  2000, 2100, 2200, 2300, 2400, 2600, 2700, 2800, 2900, 3000, 3100, 5000, 9000, 9900, 10000, 10100, 10200,
-])
+// 一手证据（0.2.0-rc.2）：dsh-system-prompt 自带这两个段名（包内注册常量）。
+// 其余官方段名清单随 dev-mount 冒烟实取快照扩充（见 memory/agent-log.md 流水）。
+export const OUR_SECTION_PREFIX = 'dsh-custom:'
+export const VERIFIED_OFFICIAL_SECTIONS = new Set(['harness:identity', 'deployment:persona'])
 
-export function classifySection(s: { order?: number; name?: string }): 'official' | 'external' {
-  const o = typeof s?.order === 'number' ? s.order : Number.NaN
-  return OFFICIAL_ORDERS.has(o) ? 'official' : 'external'
+export type SectionOrigin = 'ours' | 'official' | 'other'
+
+export function classifySectionName(name: string): SectionOrigin {
+  const n = String(name ?? '')
+  if (n.startsWith(OUR_SECTION_PREFIX)) return 'ours'
+  if (VERIFIED_OFFICIAL_SECTIONS.has(n)) return 'official'
+  return 'other'
+}
+
+export interface SectionView {
+  name: string
+  origin: SectionOrigin
+  chars: number
+  text: string
+}
+
+export interface AssemblyView {
+  sections: SectionView[]
+  contexts: Array<{ name: string; chars: number }>
+  tools: string[]
+  variables: string[]
+  rendered: string | null
+  rendererAvailable: boolean
+  generatedAt: string
+  scopeLabel: string
+}
+
+export function buildAssemblyView(asm: any, rendered: string | null, rendererAvailable: boolean): AssemblyView {
+  const sections: SectionView[] = (asm?.sections ?? []).map((s: any) => {
+    const name = String(s?.name ?? '')
+    const text = String(s?.text ?? '')
+    return { name, origin: classifySectionName(name), chars: text.length, text }
+  })
+  return {
+    sections,
+    contexts: (asm?.contexts ?? []).map((c: any) => ({ name: String(c?.name ?? ''), chars: String(c?.text ?? '').length })),
+    tools: (asm?.tools ?? []).map((t: any) => String(t?.name ?? '')).filter((n: string) => n.length > 0),
+    variables: Object.keys(asm?.variables ?? {}),
+    rendered,
+    rendererAvailable,
+    generatedAt: new Date().toISOString(),
+    scopeLabel: '全局（未附着会话作用域）',
+  }
 }
 
 const dynImport = new Function('s', 'return import(s)') as (s: string) => Promise<any>
 
-export interface AssemblyView {
-  sections: Array<{ order: number; name: string; origin: 'official' | 'external'; content: string }>
-  rendered: string | null
-  rendererAvailable: boolean
-}
-
-export async function readAssembly(ctx: any): Promise<AssemblyView> {
-  const asm = await ctx.systemPrompt.assemble({})
-  const sections = (asm?.sections ?? []).map((s: any) => ({
-    order: typeof s?.order === 'number' ? s.order : Number.NaN,
-    name: String(s?.name ?? ''),
-    origin: classifySection(s),
-    content: String(s?.content ?? ''),
-  }))
+export async function readAssembly(svc: { assemble: (context?: unknown) => Promise<unknown> }): Promise<AssemblyView> {
+  const asm: any = await svc.assemble()
   let rendered: string | null = null
   let rendererAvailable = false
   try {
@@ -233,8 +262,84 @@ export async function readAssembly(ctx: any): Promise<AssemblyView> {
     // 宿主渲染器不可用时降级：仅给出分区原文（视图层标注「未渲染」）
     rendered = null
   }
-  sections.sort((a: { order: number }, b: { order: number }) => a.order - b.order)
-  return { sections, rendered, rendererAvailable }
+  return buildAssemblyView(asm, rendered, rendererAvailable)
+}
+
+// ── 状态读取（存储 + 护栏计数）────────────────────────────────────
+
+export interface GuardStats {
+  denied: number
+  touched: number
+}
+
+export interface StatusView {
+  root: string
+  files: Array<{ name: string; hash: string | null; mtime: string | null; bytes: number | null }>
+  externalChanges: ExternalChange[]
+  guard: GuardStats
+  note: string
+}
+
+export function collectStatus(root: string, stats: GuardStats): StatusView {
+  const changes = detectExternalChanges(root)
+  const files = TRACKED.map((name) => {
+    let mtime: string | null = null
+    let bytes: number | null = null
+    try {
+      const st = statSync(join(root, name))
+      mtime = st.mtime.toISOString()
+      bytes = st.size
+    } catch {
+      // 文件不存在：hash 也会是 null
+    }
+    return { name, hash: hashOfFile(join(root, name)), mtime, bytes }
+  })
+  return {
+    root,
+    files,
+    externalChanges: changes,
+    guard: { denied: stats.denied, touched: stats.touched },
+    note: 'P0 保守子集：模型写存储＝拦截＋提示＋留痕（语义 b 的确认放行随 P2 交付）',
+  }
+}
+
+// ── HTTP 数据面（同源 /api/dsh-custom/*）──────────────────────────
+
+function jsonResponse(res: any, code: number, payload: unknown): void {
+  const body = JSON.stringify(payload)
+  res.writeHead(code, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
+  res.end(body)
+}
+
+export function makeApi(root: string, getService: () => { assemble: (context?: unknown) => Promise<unknown> } | null, stats: GuardStats): (req: any, res: any) => void {
+  return (req: any, res: any) => {
+    const method = String(req?.method ?? 'GET').toUpperCase()
+    if (method !== 'GET') {
+      jsonResponse(res, 405, { ok: false, error: 'method not allowed' })
+      return
+    }
+    const pathname = String(req?.url ?? '').split('?')[0].replace(/\/+$/, '') || '/'
+    if (pathname === '/api/dsh-custom/assembly') {
+      const svc = getService()
+      if (!svc) {
+        jsonResponse(res, 503, { ok: false, error: 'systemPrompt 服务尚不可用（宿主未提供或尚未就绪）' })
+        return
+      }
+      readAssembly(svc)
+        .then((value) => jsonResponse(res, 200, { ok: true, value }))
+        .catch((e: unknown) => jsonResponse(res, 500, { ok: false, error: String((e as { message?: unknown })?.message ?? e) }))
+      return
+    }
+    if (pathname === '/api/dsh-custom/status') {
+      try {
+        jsonResponse(res, 200, { ok: true, value: collectStatus(root, stats) })
+      } catch (e: unknown) {
+        jsonResponse(res, 500, { ok: false, error: String((e as { message?: unknown })?.message ?? e) })
+      }
+      return
+    }
+    jsonResponse(res, 404, { ok: false, error: 'not found' })
+  }
 }
 
 // ── 插件装载 ─────────────────────────────────────────────────────
@@ -243,22 +348,43 @@ export function apply(ctx: any): () => void {
   const root = storageRoot()
   const info = ensureStorage(root)
   const changes = detectExternalChanges(root)
+  const stats: GuardStats = { denied: 0, touched: 0 }
   audit(root, { kind: 'boot', created: info.created.length, externalChanges: changes.length })
   console.log(
     `[dsh-custom] P0 运行时已装载 | 存储=${root} | 新建=${info.created.length} | 检测到会话外改动=${changes.length}`,
   )
   console.log('[dsh-custom] 护栏：模型对存储区写入＝拦截＋提示＋留痕（P0 保守子集；语义 b 确认放行随 P2）')
 
+  let service: { assemble: (context?: unknown) => Promise<unknown> } | null = null
+  ctx.inject(['systemPrompt'], (scoped: any) => {
+    service = scoped.systemPrompt
+    audit(root, { kind: 'sysprompt-attached' })
+  })
+
+  ctx.inject(['webServer'], (scoped: any) => {
+    const api = makeApi(root, () => service, stats)
+    scoped.effect(
+      () => scoped.webServer.register({ kind: 'prefix', path: '/api/dsh-custom', handler: api }),
+      'dsh-custom: api routes',
+    )
+    audit(root, { kind: 'api-mounted', path: '/api/dsh-custom' })
+    console.log('[dsh-custom] 数据面已挂载：/api/dsh-custom/{assembly,status}')
+  })
+
   const dispose = ctx.on(
     'tools/pre-execute',
     async (exec: { name?: string; arguments?: unknown }, next: () => Promise<unknown>) => {
       const d = guardDecision(exec?.name ?? '', exec?.arguments, root)
       if (d.action === 'deny') {
+        stats.denied++
         audit(root, { kind: 'guard-deny', tool: exec?.name, reason: 'P0 保守子集：模型写存储' })
         console.log(`[dsh-custom] 护栏拦截：${exec?.name}`)
         return { kind: 'deny', reason: d.reason }
       }
-      if (d.touches) audit(root, { kind: 'storage-touch', tool: exec?.name })
+      if (d.touches) {
+        stats.touched++
+        audit(root, { kind: 'storage-touch', tool: exec?.name })
+      }
       return next()
     },
   )

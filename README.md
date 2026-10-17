@@ -2,9 +2,10 @@
 
 系统提示词管理插件：**看清**每次组装实际可用的官方系统提示词、**深改**其内容（整段接管）、并把纪律文本前置到 system 层。
 
-> 当前为 **P0**：存储骨架 ＋ 防静默改写护栏（拦截＋提示＋留痕）＋ 装配读取数据面。
-> 设置页（渲染层）与深改（override / complete）随 P1/P2 交付。设计档：
+> 当前为 **P0**：存储骨架 ＋ 防静默改写护栏（拦截＋提示＋留痕）＋ HTTP 数据面＋浏览器半页签（插件设置区内「DSH自定义」）。
+> 深改（override / complete / 纪律注入）随 P1/P2 交付。设计档：
 > `D:/DeepSeek/dsh-plugin-dev/docs/design-specs/dsh-custom-prompt-design-20261017.md`
+> 交接文档（P0 现场、卡点、环境）：`D:/DeepSeek/dsh-plugin-dev/docs/handover-dsh-custom-20261017.md`
 
 ## 它做什么
 
@@ -24,6 +25,12 @@ $DSH_HOME/dsh-custom/
   audit.jsonl      留痕：boot / guard-deny / storage-touch / external-change / snapshot
 ```
 
+## 数据面与界面（P0 已实现）
+
+- **HTTP 数据面（宿主半）**：`GET /api/dsh-custom/assembly`（实际装配视图：分区＋归属＋渲染全文）｜`GET /api/dsh-custom/status`（存储/护栏/会话外改动）。经 `ctx.inject(['webServer'])` 挂载（`server.register({kind:'prefix',…})`），浏览器半同源 fetch。
+- **浏览器半（`client.js`）**：`window.__ModuleLoader__.load` 形态（仅依赖宿主 externals：react）；注册 `settings.plugins.tab` 页签「DSH自定义」（id `dsh-custom`，order 60）；双视图＝装配全文（渲染）/分区源码；归属徽标 ours/official/other。
+- **已验证（2026-10-17，桌面 App 实测）**：启动行/存储落盘/API 200 全通。**待解决**：①桌面 App 内页签尚未出现；②宿主 `renderPrompt` 动态导入失败（渲染视图降级为原文）。详见交接文档。
+
 ## 护栏语义（已拍板：语义 b）
 
 > **允许模型改动存储，但必须经提示/确认并留痕（防静默）。**
@@ -39,7 +46,7 @@ npm run build      # tsc → lib/
 npm test           # node scripts/run-tests.mjs（直跑 src 的 .ts，node 24 type-stripping）
 ```
 
-开发态挂载（临时 insert，按「撤除清单」登记）：见 `cordis.yml`（`file://` 直载 `src/index.ts`）。
+开发态挂载（临时 insert，按「撤除清单」登记）：见 `cordis.yml`（`file://` 直载 `src/index.ts`）。桌面 App 档现状＝junction（`profiles/node_modules/dsh-custom`→本仓）＋裸包名条目——撤除三步见交接文档 §4。
 
 ## 设计取舍备忘
 
