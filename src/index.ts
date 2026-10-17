@@ -1127,6 +1127,29 @@ export function makeApi(
       jsonResponse(res, 405, { ok: false, error: 'method not allowed' })
       return
     }
+    // ── P4：审计流（⑦区数据面：audit.jsonl 尾部 N 条）──
+    if (pathname === '/api/dsh-custom/audit') {
+      if (method === 'GET') {
+        try {
+          const f = readCachedFile(join(root, 'audit.jsonl'))
+          const lines = (f?.text ?? '').split('\n').filter((l) => l.trim().length > 0)
+          const limit = Math.min(100, Math.max(1, Number(new URL(String(req?.url ?? '/'), 'http://x').searchParams.get('limit') ?? 50)))
+          const tail = lines.slice(-limit).map((l) => {
+            try {
+              return JSON.parse(l)
+            } catch {
+              return { kind: 'unparsable', raw: l.slice(0, 120) }
+            }
+          })
+          jsonResponse(res, 200, { ok: true, value: { total: lines.length, entries: tail.reverse() } })
+        } catch {
+          jsonResponse(res, 200, { ok: true, value: { total: 0, entries: [] } })
+        }
+        return
+      }
+      jsonResponse(res, 405, { ok: false, error: 'method not allowed' })
+      return
+    }
     // ── P4/P5：我的提示词（user-prompt）──
     if (pathname === '/api/dsh-custom/user-prompt') {
       if (method === 'GET') {
