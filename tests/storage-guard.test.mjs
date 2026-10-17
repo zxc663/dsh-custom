@@ -193,6 +193,7 @@ const bv = buildAssemblyView(fakeAsm, 'RENDERED', true)
 check('分区映射 name/origin/chars 正确', bv.sections.length === 3 && bv.sections[0].origin === 'official' && bv.sections[1].origin === 'ours' && bv.sections[2].origin === 'other' && bv.sections[1].chars === 2)
 check('上下文/工具/变量映射正确', bv.contexts.length === 1 && bv.contexts[0].chars === 8 && bv.tools.join(',') === 'bash,read' && bv.variables.join(',') === 'cwd,model')
 check('渲染与降级字段透传', bv.rendered === 'RENDERED' && bv.rendererAvailable === true)
+check('scopeLabel 默认与覆写', bv.scopeLabel.includes('全局') && buildAssemblyView(fakeAsm, null, false, null, '会话 abc（作用域实取）').scopeLabel === '会话 abc（作用域实取）')
 
 console.log('H. readAssembly 降级不变量')
 {
@@ -418,6 +419,30 @@ console.log('M. HTTP 数据面（P1 端点：discipline/settings/agents）')
     const enConflict = await callApi(apiConflict, 'PUT', '/api/dsh-custom/override/enable', JSON.stringify({ enabled: true }))
     check('互斥冲突 → 409 且含对方段名', enConflict.code === 409 && Array.isArray(enConflict.json.conflict) && enConflict.json.conflict.includes('other:thing'))
     check('冲突后自动回退为关闭', readInjectSettings(apiTmp2).overrideEnabled === false)
+
+    // P2+：会话级实取视图（assemble({agent, scope: agent}) 与真实请求同法）
+    let receivedContext = null
+    const fakeAgent = { id: 'sess-1' }
+    const agentsViewFake = {
+      list: () => [{ id: 'sess-1', cwd: 'D:\\ws\\a' }],
+      resolve: (id) => (id === 'sess-1' ? { agent: fakeAgent, cwd: 'D:\\ws\\a' } : null),
+    }
+    const scopedSvc = {
+      assemble: async (ctx) => {
+        receivedContext = ctx
+        return fakeAsm
+      },
+    }
+    const api3 = makeApi(apiTmp2, () => scopedSvc, { denied: 0, touched: 0 }, undefined, undefined, agentsViewFake)
+    const gsess = await callApi(api3, 'GET', '/api/dsh-custom/sessions')
+    check('GET sessions 200', gsess.code === 200 && gsess.json.value.sessions.length === 1 && gsess.json.value.sessions[0].cwd === 'D:\\ws\\a')
+    const gas = await callApi(api3, 'GET', '/api/dsh-custom/assembly?session=sess-1')
+    check(
+      'assembly?session 200 且以 scope=agent 求装配',
+      gas.code === 200 && String(gas.json.value.scopeLabel).includes('作用域实取') && receivedContext !== null && receivedContext.agent === fakeAgent && receivedContext.scope === fakeAgent,
+    )
+    const gasBad = await callApi(api3, 'GET', '/api/dsh-custom/assembly?session=nope')
+    check('assembly 未知会话 → 404', gasBad.code === 404)
   } finally {
     rmSync(apiTmp2, { recursive: true, force: true })
   }

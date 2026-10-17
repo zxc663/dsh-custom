@@ -120,6 +120,8 @@ window.__ModuleLoader__.load({
 			const [ovMsg, setOvMsg] = useState(null);
 			const [bk, setBk] = useState(null);
 			const [bkMsg, setBkMsg] = useState(null);
+			const [sessions, setSessions] = useState(null);
+			const [viewScope, setViewScope] = useState('');
 			const [draft, setDraft] = useState(null);
 			const [saving, setSaving] = useState(false);
 			const [saveMsg, setSaveMsg] = useState(null);
@@ -130,7 +132,8 @@ window.__ModuleLoader__.load({
 				setLoading(true);
 				setError(null);
 				try {
-					const results = await Promise.all([api('assembly'), api('status'), api('discipline'), api('settings'), api('agents'), api('scope'), api('override'), api('backups')]);
+					const asmPath = 'assembly' + (viewScope ? '?session=' + encodeURIComponent(viewScope) : '');
+					const results = await Promise.all([api(asmPath), api('status'), api('discipline'), api('settings'), api('agents'), api('scope'), api('override'), api('backups'), api('sessions')]);
 					setView(results[0]);
 					setStatus(results[1]);
 					setDisc(results[2]);
@@ -140,13 +143,14 @@ window.__ModuleLoader__.load({
 					setOv(results[6]);
 					setOvDraft(results[6].text);
 					setBk(results[7].entries);
+					setSessions(results[8].sessions);
 					setDraft(results[2].sourceText);
 				} catch (e) {
 					setError(String((e && e.message) || e));
 				} finally {
 					setLoading(false);
 				}
-			}, []);
+			}, [viewScope]);
 			useEffect(() => { void load(); }, [load]);
 
 			const saveScopeDraft = useCallback(async () => {
@@ -254,6 +258,12 @@ window.__ModuleLoader__.load({
 						h('div', { className: 'dshc_seg' },
 							h('button', { 'data-active': mode === 'rendered', onClick: () => setMode('rendered') }, '装配全文（渲染）'),
 							h('button', { 'data-active': mode === 'source', onClick: () => setMode('source') }, '分区源码'),
+						),
+						h('select', { className: 'dshc_in', value: viewScope, style: { maxWidth: 300 }, onChange: (e) => setViewScope(e.target.value) },
+							h('option', { value: '', key: 'g' }, '作用域：全局（未附着会话）'),
+							...(sessions || []).map((s0) =>
+								h('option', { value: s0.id, key: s0.id }, '会话 ' + s0.id.replace(/^session-/, '').slice(0, 8) + (s0.cwd ? '｜' + s0.cwd.split(/[\\/]/).pop() : '')),
+							),
 						),
 						h('span', { className: 'dshc_meta' },
 							'生成于 ' + fmtTime(view.generatedAt) + ' ｜ ' + (view.scopeLabel || '') + ' ｜ ' +

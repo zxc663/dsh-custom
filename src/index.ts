@@ -622,6 +622,7 @@ export function buildAssemblyView(
   rendered: string | null,
   rendererAvailable: boolean,
   renderNote: string | null = null,
+  scopeLabel: string = '全局（未附着会话作用域）',
 ): AssemblyView {
   const sections: SectionView[] = (asm?.sections ?? []).map((s: any) => {
     const name = String(s?.name ?? '')
@@ -637,7 +638,7 @@ export function buildAssemblyView(
     rendererAvailable,
     renderNote,
     generatedAt: new Date().toISOString(),
-    scopeLabel: '全局（未附着会话作用域）',
+    scopeLabel,
   }
 }
 
@@ -748,6 +749,7 @@ export async function readAssembly(
   svc: { assemble: (context?: unknown) => Promise<unknown> },
   loader?: RendererLoader,
   root?: string | null,
+  scopeLabel?: string,
 ): Promise<AssemblyView> {
   const asm: any = await svc.assemble()
   let rendered: string | null = null
@@ -785,7 +787,7 @@ export async function readAssembly(
   } catch (e) {
     console.warn('[dsh-custom] renderPrompt 调用失败（渲染视图降级为原文）：', String((e as { message?: unknown })?.message ?? e))
   }
-  return buildAssemblyView(asm, rendered, rendererAvailable, renderNote)
+  return buildAssemblyView(asm, rendered, rendererAvailable, renderNote, scopeLabel)
 }
 
 // ── 状态读取（存储 + 护栏计数）────────────────────────────────────
@@ -865,12 +867,18 @@ function readJsonBody(req: any, limit = 1024 * 1024): Promise<Record<string, unk
   })
 }
 
+export interface AgentsView {
+  list: () => Array<{ id: string; cwd: string | null }>
+  resolve: (id: string) => { agent: unknown; cwd: string | null } | null
+}
+
 export function makeApi(
   root: string,
   getService: () => { assemble: (context?: unknown) => Promise<unknown> } | null,
   stats: GuardStats,
   loader?: RendererLoader,
   onAccess?: () => void,
+  agentsView?: AgentsView,
 ): (req: any, res: any) => void {
   const handlePut = (req: any, res: any, run: (body: Record<string, unknown>) => unknown): void => {
     readJsonBody(req)
@@ -899,9 +907,32 @@ export function makeApi(
         jsonResponse(res, 503, { ok: false, error: 'systemPrompt 服务尚不可用（宿主未提供或尚未就绪）' })
         return
       }
+      const sessionId = new URL(String(req?.url ?? '/'), 'http://x').searchParams.get('session')
+      if (sessionId !== null && sessionId.length > 0) {
+        // P2+：会话级实取——与真实请求同法：assemble({ agent, scope: agent })（#决策 2026-10-17 18:2x）
+        const found = agentsView?.resolve(sessionId) ?? null
+        if (found === null) {
+          jsonResponse(res, 404, { ok: false, error: '会话不存在或未活跃（请先在对应会话中发一条消息激活，再刷新）' })
+          return
+        }
+        const scoped = { assemble: () => svc.assemble({ agent: found.agent, scope: found.agent }) }
+        const label = `会话 ${sessionId.replace(/^session-/, '').slice(0, 8)}${found.cwd !== null ? `｜${found.cwd}` : ''}（作用域实取）`
+        readAssembly(scoped, loader, root, label)
+          .then((value) => jsonResponse(res, 200, { ok: true, value }))
+          .catch((e: unknown) => jsonResponse(res, 500, { ok: false, error: String((e as { message?: unknown })?.message ?? e) }))
+        return
+      }
       readAssembly(svc, loader, root)
         .then((value) => jsonResponse(res, 200, { ok: true, value }))
         .catch((e: unknown) => jsonResponse(res, 500, { ok: false, error: String((e as { message?: unknown })?.message ?? e) }))
+      return
+    }
+    if (pathname === '/api/dsh-custom/sessions') {
+      if (method !== 'GET') {
+        jsonResponse(res, 405, { ok: false, error: 'method not allowed' })
+        return
+      }
+      jsonResponse(res, 200, { ok: true, value: { sessions: agentsView?.list() ?? [] } })
       return
     }
     if (pathname === '/api/dsh-custom/status') {
@@ -1139,6 +1170,19 @@ export function apply(ctx: any): () => void {
   })
 
   // P1b：按 agent 作用域注册同名段（遮蔽全局；命中工作区规则即覆盖，cwd 实时读取 ⇒ 位置转移自动跟随）
+  // 附：会话级视图数据源（agentsView，真实请求同法 assemble({agent, scope: agent})）
+  let agentsRef: any = null
+  const agentsView: AgentsView = {
+    list: () =>
+      ((agentsRef?.list() ?? []) as any[])
+        .map((a) => ({ id: String(a?.id ?? ''), cwd: typeof a?.session?.header?.cwd === 'string' ? a.session.header.cwd : null }))
+        .filter((x) => x.id.length > 0),
+    resolve: (id: string) => {
+      const agent = agentsRef?.get(id) ?? null
+      if (agent === null || agent === undefined) return null
+      return { agent, cwd: typeof agent?.session?.header?.cwd === 'string' ? agent.session.header.cwd : null }
+    },
+  }
   const scopedDisciplineFibers = new Map<unknown, unknown>()
   const installScopedDiscipline = (agent: any): void => {
     if (scopedDisciplineFibers.has(agent)) return
@@ -1149,6 +1193,7 @@ export function apply(ctx: any): () => void {
     }
   }
   ctx.inject(['agents'], (agentsCtx: any) => {
+    agentsRef = agentsCtx.agents
     for (const agent of agentsCtx.agents.list()) installScopedDiscipline(agent)
     agentsCtx.on('agent/created', ({ agent }: { agent: unknown }) => installScopedDiscipline(agent))
     agentsCtx.on('agent/disposed', ({ agent }: { agent: unknown }) => {
@@ -1164,7 +1209,7 @@ export function apply(ctx: any): () => void {
   const rendererLoader = makeRendererLoader(ctx, root)
 
   ctx.inject(['webServer'], (scoped: any) => {
-    const api = makeApi(root, () => service, stats, rendererLoader, syncOverride)
+    const api = makeApi(root, () => service, stats, rendererLoader, syncOverride, agentsView)
     scoped.effect(
       () => scoped.webServer.register({ kind: 'prefix', path: '/api/dsh-custom', handler: api }),
       'dsh-custom: api routes',
