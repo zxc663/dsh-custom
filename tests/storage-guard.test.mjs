@@ -1,7 +1,8 @@
 // P0 单测：存储骨架 / 护栏（语义 b 保守子集）/ 会话外改动留痕 / 装配视图数据面 / HTTP 数据面
-import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync, existsSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import {
   buildAssemblyView,
   classifySectionName,
@@ -12,7 +13,9 @@ import {
   guardDecision,
   hashOfFile,
   makeApi,
+  makeRendererLoader,
   readAssembly,
+  renderPromptTolerant,
   resolveHome,
   snapshot,
   squash,
@@ -96,6 +99,39 @@ check(
   })(),
 )
 check('read 工具读存储 → allow（非写）', guardDecision('read', { file_path: ROOT + '/meta.json' }, ROOT).action === 'allow')
+
+// D1 回归（2026-10-17 实机误拦）：只读命令因 `2>&1` 被旧 `>\s*\S` 误判为写 → 修复后必须放行
+check(
+  '2>&1 流合并不误判为写（D1 回归）',
+  (() => {
+    const d = guardDecision('pwsh', { command: `Get-ChildItem "D:\\ai本地模型\\dsh\\dsh-custom" -Force | Select-Object Name 2>&1` }, ROOT)
+    return d.action === 'allow' && d.touches
+  })(),
+)
+check(
+  '2>$null 空重定向不误判',
+  guardDecision('pwsh', { command: `Get-Content 'D:\\ai本地模型\\dsh\\dsh-custom\\meta.json' 2>$null` }, ROOT).action === 'allow',
+)
+check(
+  '=> / -> 箭头不误判为重定向',
+  guardDecision('pwsh', { command: `Write-Output "a => D:\\ai本地模型\\dsh\\dsh-custom"` }, ROOT).action === 'allow',
+)
+check(
+  '真实重定向写存储 → deny',
+  guardDecision('pwsh', { command: `echo x > "D:\\ai本地模型\\dsh\\dsh-custom\\x.md"` }, ROOT).action === 'deny',
+)
+check(
+  'rm 命令位删存储 → deny',
+  guardDecision('bash', { command: `rm -rf 'D:\\ai本地模型\\dsh\\dsh-custom\\backups'` }, ROOT).action === 'deny',
+)
+check(
+  'bash -c 内嵌 rm → deny',
+  guardDecision('bash', { command: `bash -c "rm 'D:\\ai本地模型\\dsh\\dsh-custom\\discipline.md'"` }, ROOT).action === 'deny',
+)
+check(
+  'Move-Item 写存储 → deny',
+  guardDecision('pwsh', { command: `Move-Item 'D:\\ai本地模型\\dsh\\dsh-custom\\a.md' 'D:\\ai本地模型\\dsh\\dsh-custom\\b.md'` }, ROOT).action === 'deny',
+)
 
 console.log('E. 存储骨架（临时目录实战）')
 const tmp = mkdtempSync(join(tmpdir(), 'dsh-custom-test-'))
@@ -199,6 +235,61 @@ const svcFake = { assemble: async () => fakeAsm }
   } finally {
     rmSync(apiTmp, { recursive: true, force: true })
   }
+}
+
+console.log('J. 渲染器分层解析（makeRendererLoader）')
+{
+  const base = mkdtempSync(join(tmpdir(), 'dsh-custom-render-'))
+  try {
+    const pkgDir = join(base, 'node_modules', '@deepseek-ai', 'dsh-system-prompt')
+    mkdirSync(pkgDir, { recursive: true })
+    writeFileSync(
+      join(pkgDir, 'package.json'),
+      JSON.stringify({ name: '@deepseek-ai/dsh-system-prompt', version: '0.0.0-test', type: 'module', exports: { '.': './index.js' } }) + '\n',
+    )
+    writeFileSync(
+      join(pkgDir, 'index.js'),
+      'export function renderPrompt(assembly) { return "FAKE:" + (assembly && assembly.sections ? assembly.sections.length : 0) }\n',
+    )
+    const storeJ = join(base, 'storage')
+    ensureStorage(storeJ)
+    const loader = makeRendererLoader({ baseUrl: pathToFileURL(base.endsWith('/') ? base : base + '/').href }, storeJ)
+    const mod = await loader()
+    check('ctx-baseUrl 策略可解析假包', mod !== null && typeof mod.renderPrompt === 'function')
+    check('假 renderPrompt 可用', mod !== null && String(mod.renderPrompt({ sections: [1, 2] })) === 'FAKE:2')
+    const auditJ = readFileSync(join(storeJ, 'audit.jsonl'), 'utf8')
+    check('解析成功落 audit renderer-resolve 行', auditJ.includes('renderer-resolve') && auditJ.includes('ctx-baseUrl'))
+    const none = makeRendererLoader({ baseUrl: 'file:///D:/__dsh_custom_nonexistent__/' }, null)
+    check('全部策略失败返回 null（不抛）', (await none()) === null)
+    const readBack = await readAssembly({ assemble: async () => fakeAsm }, loader)
+    check('readAssembly 注入 loader 后渲染可用且文本正确', readBack.rendererAvailable === true && readBack.rendered === 'FAKE:3')
+  } finally {
+    rmSync(base, { recursive: true, force: true })
+  }
+}
+
+console.log('K. 容错渲染（严格渲染被运行时变量阻止时）')
+{
+  const strictThrower = {
+    renderPrompt: () => {
+      throw new Error('unknown prompt variable "{{model}}" in section "deployment:persona-prefix"; registered variables: provider')
+    },
+  }
+  const tolerantAsm = {
+    sections: [
+      { name: 'a', text: 'hi {{model}}!' },
+      { name: 'b', text: '' },
+      { name: 'c', text: 'literal', interpolate: false },
+    ],
+    contexts: [],
+    tools: [],
+    variables: { provider: 'p' },
+  }
+  const viewT = await readAssembly({ assemble: async () => tolerantAsm }, async () => strictThrower)
+  check('严格失败 → 容错渲染可用', viewT.rendererAvailable === true && viewT.rendered === 'hi {{model}}!\n\nliteral')
+  check('容错渲染带提示（含未解析变量）', typeof viewT.renderNote === 'string' && viewT.renderNote.includes('{{model}}'))
+  const direct = renderPromptTolerant({ sections: [{ name: 'x', text: 'v={{provider}} u={{model}}' }], variables: { provider: 'opencode' } })
+  check('renderPromptTolerant 替换已解析、保留未解析', direct.text === 'v=opencode u={{model}}' && direct.unresolved.join(',') === '{{model}}')
 }
 
 console.log(`\n结果：${pass} 通过 / ${fail} 失败`)

@@ -144,16 +144,23 @@ window.__ModuleLoader__.load({
 						),
 						h('span', { className: 'dshc_meta' },
 							'生成于 ' + fmtTime(view.generatedAt) + ' ｜ ' + (view.scopeLabel || '') + ' ｜ ' +
-							(view.rendererAvailable ? '渲染器在线' : '宿主渲染器不可用（已降级为原文）'),
+							(view.rendererAvailable
+								? view.renderNote
+									? '渲染器在线（容错模式）'
+									: '渲染器在线'
+								: '宿主渲染器不可用（已降级为原文）'),
 						),
 					),
 				);
 				if (mode === 'rendered') {
-					children.push(
-						view.rendered === null
-							? h('div', { className: 'dshc_note', key: 'rn' }, '未能渲染（宿主 renderPrompt 导入失败）；请切到「分区源码」查看原文。')
-							: h('pre', { className: 'dshc_pre', key: 'rp' }, view.rendered.length > 0 ? view.rendered : '（空）'),
-					);
+					if (view.rendered === null) {
+						children.push(h('div', { className: 'dshc_note', key: 'rn' }, '未能渲染（宿主 renderPrompt 不可用）；请切到「分区源码」查看原文。'));
+					} else {
+						if (view.renderNote) {
+							children.push(h('div', { className: 'dshc_note', key: 'rnote' }, '注意：' + view.renderNote));
+						}
+						children.push(h('pre', { className: 'dshc_pre', key: 'rp' }, view.rendered.length > 0 ? view.rendered : '（空）'));
+					}
 				} else {
 					children.push(
 						h('ul', { className: 'dshc_list', key: 'src' },
@@ -192,11 +199,13 @@ window.__ModuleLoader__.load({
 
 		const inject = ['slots'];
 
+		// #决策 2026-10-17 15:46 入口=设置导航区一级条目（settings.section，形制同官方「Agent 预设」）；
+		// 由「内置插件」分区页签（settings.plugins.tab）移出——该页签实机可注册但层级隐藏，可见性不佳。
 		function apply(ctx) {
-			ctx.slots.inject('settings.plugins.tab', () => ctx.slots.register({
-				name: 'settings.plugins.tab',
+			ctx.slots.inject('settings.section', () => ctx.slots.register({
+				name: 'settings.section',
 				id: 'dsh-custom',
-				order: 60,
+				order: 30,
 				label: () => 'DSH自定义',
 			}, Tab));
 		}

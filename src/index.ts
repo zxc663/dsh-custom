@@ -6,8 +6,10 @@
 // 设计档：D:/DeepSeek/dsh-plugin-dev/docs/design-specs/dsh-custom-prompt-design-20261017.md
 import { appendFileSync, copyFileSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
+import { createRequire } from 'node:module'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 
 // ── 路径与会话外定位 ──────────────────────────────────────────────
 
@@ -46,7 +48,12 @@ export function isInsideStorage(candidate: string, root: string): boolean {
 
 const SHELL_TOOLS = new Set(['bash', 'shell', 'sh', 'powershell', 'pwsh', 'cmd', 'exec', 'run_command', 'terminal'])
 const WRITE_TOOL_RE = /(write|edit|patch|create|mkdir|touch|move|rename|copy|delete|remove|unlink|erase|truncate|save|append|upload)/
-const SHELL_WRITE_RE = /(remove-item|set-content|add-content|out-file|new-item|clear-content|\bdel\b|\berase\b|\brd\b|\brmdir\b|\brm\b|\bmv\b|\bmove\b|\bcopy\b|\bcp\b|\bmkdir\b|\bren\b|writefile|writealltext|writeallbytes|unlink|rmtree|os\.remove|shutil|>\s*\S)/i
+// #决策 2026-10-17 15:46 护栏误报修复（D1）：原 `>\s*\S` 把 `2>&1` / `>$null` 这类流合并、空重定向
+// 误判为文件写（实机误拦一条只读 pwsh 命令，证据=audit guard-deny 行）；写类短动词（del/rm/cp 等）
+// 收窄为「命令位」匹配，防正文/路径片段误伤；PowerShell 长动词补齐 move/copy/rename/set-item。
+const SHELL_WRITE_NAMES_RE = /(remove-item|set-content|add-content|out-file|new-item|clear-content|set-item|move-item|copy-item|rename-item|writefile|writealltext|writeallbytes|unlink|rmtree|os\.remove|shutil)/i
+const SHELL_WRITE_VERB_RE = /(?:^|[\r\n;&|(){}'"`])\s*(?:rmdir|rename|erase|mkdir|move|copy|del|rd|rm|mv|cp|ren)(?=\s)/i
+const SHELL_REDIRECT_RE = /(?<![=\-])>+[ \t]*(?!=)(?!&[0-9]|\$null\b|nul\b|\$env:NUL\b)(?=\S)/i
 
 export function flattenStrings(v: unknown, out: string[] = []): string[] {
   if (typeof v === 'string') {
@@ -77,7 +84,9 @@ export function guardDecision(toolName: string, args: unknown, root: string): Gu
 
   const isShell = SHELL_TOOLS.has(name)
   const isWriteTool = !isShell && WRITE_TOOL_RE.test(name)
-  const shellWrites = isShell && SHELL_WRITE_RE.test(blobs.join(' '))
+  const joined = isShell ? blobs.join(' ') : ''
+  const shellWrites =
+    isShell && (SHELL_WRITE_NAMES_RE.test(joined) || SHELL_WRITE_VERB_RE.test(joined) || SHELL_REDIRECT_RE.test(joined))
 
   if (isWriteTool || shellWrites) {
     return {
@@ -133,15 +142,19 @@ export function audit(root: string, entry: Record<string, unknown>): void {
   try {
     mkdirSync(root, { recursive: true })
     appendFileSync(join(root, 'audit.jsonl'), JSON.stringify({ ts: new Date().toISOString(), ...entry }) + '\n', 'utf8')
-  } catch {
-    // 留痕失败不阻断主流程（宿主控制台日志仍可查）
+  } catch (e) {
+    // 留痕失败不阻断主流程；审计自身失败无法再入审计，降级到控制台兜底（#决策 2026-10-17 D2：不留空 catch）
+    console.warn('[dsh-custom] audit 写入失败：', String((e as { message?: unknown })?.message ?? e))
   }
 }
 
 export function hashOfFile(p: string): string | null {
   try {
     return createHash('sha256').update(readFileSync(p)).digest('hex').slice(0, 16)
-  } catch {
+  } catch (e) {
+    // 文件不存在（ENOENT）属常态；其余读取失败须可见（#决策 2026-10-17 D2）
+    const code = (e as { code?: unknown })?.code
+    if (code !== 'ENOENT') console.warn(`[dsh-custom] 存储文件读取失败（${String(code ?? e)}）：${p}`)
     return null
   }
 }
@@ -157,7 +170,10 @@ export function detectExternalChanges(root: string): ExternalChange[] {
   let meta: { version?: number; hashes?: Record<string, string | null>; updatedAt?: string | null } = {}
   try {
     meta = JSON.parse(readFileSync(metaPath, 'utf8'))
-  } catch {
+  } catch (e) {
+    // meta 不存在（首启动）属常态；损坏/不可读须留痕（#决策 2026-10-17 D2）
+    const code = (e as { code?: unknown })?.code
+    if (code !== 'ENOENT') audit(root, { kind: 'meta-read-fail', detail: String(code ?? (e as { message?: unknown })?.message ?? e) })
     meta = {}
   }
   const prev = meta.hashes ?? {}
@@ -226,11 +242,17 @@ export interface AssemblyView {
   variables: string[]
   rendered: string | null
   rendererAvailable: boolean
+  renderNote: string | null
   generatedAt: string
   scopeLabel: string
 }
 
-export function buildAssemblyView(asm: any, rendered: string | null, rendererAvailable: boolean): AssemblyView {
+export function buildAssemblyView(
+  asm: any,
+  rendered: string | null,
+  rendererAvailable: boolean,
+  renderNote: string | null = null,
+): AssemblyView {
   const sections: SectionView[] = (asm?.sections ?? []).map((s: any) => {
     const name = String(s?.name ?? '')
     const text = String(s?.text ?? '')
@@ -243,26 +265,157 @@ export function buildAssemblyView(asm: any, rendered: string | null, rendererAva
     variables: Object.keys(asm?.variables ?? {}),
     rendered,
     rendererAvailable,
+    renderNote,
     generatedAt: new Date().toISOString(),
     scopeLabel: '全局（未附着会话作用域）',
   }
 }
 
+// ── 宿主渲染器加载（分层解析；逐级留痕，全失败降级为原文）────────────
+
+export interface RendererModule {
+  renderPrompt: (assembly: unknown) => string
+}
+export type RendererLoader = () => Promise<RendererModule | null>
+
+const RENDERER_SPEC = '@deepseek-ai/dsh-system-prompt'
 const dynImport = new Function('s', 'return import(s)') as (s: string) => Promise<any>
 
-export async function readAssembly(svc: { assemble: (context?: unknown) => Promise<unknown> }): Promise<AssemblyView> {
+async function importRendererAt(from: string | URL): Promise<{ mod: RendererModule; path: string }> {
+  const req = createRequire(from)
+  const abs = req.resolve(RENDERER_SPEC)
+  const mod = (await dynImport(pathToFileURL(abs).href)) as RendererModule
+  return { mod, path: abs }
+}
+
+/**
+ * #决策 2026-10-17 15:46 分层解析宿主渲染器：裸 import 在宿主内必失败——插件包经 junction 加载时
+ * Node 把 import.meta.url 归一到 realpath（D:\DeepSeek\dsh-custom\…），裸说明符解析不到 profile 安装树。
+ * 顺序：host-argv（宿主进程脚本的安装树，与运行中服务同源）→ ctx-baseUrl（profile 解析链）
+ * → loader.internal.resolveSync（宿主内部 API 兜底）→ 模块自身位置 → 裸说明符。
+ * 逐级失败落 audit（renderer-resolve-fail 带明细）；成功落 renderer-resolve（策略+路径）。
+ */
+export function makeRendererLoader(ctx: unknown, root: string | null): RendererLoader {
+  let cached: Promise<RendererModule | null> | null = null
+  return () =>
+    (cached ??= (async () => {
+      const c = ctx as { baseUrl?: unknown; loader?: { internal?: { resolveSync?: (...args: any[]) => any; version?: string } } } | null
+      const tries: Array<{ strategy: string; run: () => Promise<{ mod: RendererModule; path: string }> }> = []
+      const hostScript =
+        typeof process.argv[1] === 'string' && process.argv[1].length > 0 && !process.argv[1].startsWith('-') ? process.argv[1] : null
+      if (hostScript !== null) tries.push({ strategy: 'host-argv', run: () => importRendererAt(hostScript) })
+      const baseUrl = typeof c?.baseUrl === 'string' ? c.baseUrl : null
+      if (baseUrl !== null) {
+        tries.push({
+          strategy: 'ctx-baseUrl',
+          run: () => importRendererAt(new URL('dsh-custom.resolve-probe.js', baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`)),
+        })
+      }
+      const internal = c?.loader?.internal
+      if (internal && typeof internal.resolveSync === 'function') {
+        tries.push({
+          strategy: 'loader-internal',
+          run: async () => {
+            const base = baseUrl ?? import.meta.url
+            const resolved = internal.version === 'v2'
+              ? internal.resolveSync(base, { specifier: RENDERER_SPEC, attributes: {} })
+              : internal.resolveSync(RENDERER_SPEC, base, {})
+            const url = typeof (resolved as { url?: unknown })?.url === 'string' ? String((resolved as { url: string }).url) : null
+            if (url === null) throw new Error('resolveSync 未返回 url')
+            const mod = (await dynImport(url)) as RendererModule
+            return { mod, path: url }
+          },
+        })
+      }
+      tries.push({ strategy: 'module-url', run: () => importRendererAt(import.meta.url) })
+      tries.push({ strategy: 'bare-import', run: async () => ({ mod: (await dynImport(RENDERER_SPEC)) as RendererModule, path: RENDERER_SPEC }) })
+
+      const failures: string[] = []
+      for (const t of tries) {
+        try {
+          const loaded = await t.run()
+          if (typeof loaded.mod?.renderPrompt !== 'function') {
+            failures.push(`${t.strategy}: 无 renderPrompt 导出`)
+            continue
+          }
+          if (root !== null) audit(root, { kind: 'renderer-resolve', strategy: t.strategy, path: loaded.path, ok: true })
+          return loaded.mod
+        } catch (e) {
+          const code = (e as { code?: unknown })?.code
+          failures.push(`${t.strategy}: ${String(code ?? (e as { message?: unknown })?.message ?? e)}`)
+        }
+      }
+      const detail = failures.join(' ｜ ')
+      if (root !== null) audit(root, { kind: 'renderer-resolve-fail', detail })
+      console.warn(`[dsh-custom] 宿主渲染器解析失败（渲染视图降级为原文）：${detail}`)
+      return null
+    })())
+}
+
+/**
+ * #决策 2026-10-17 15:58 容错渲染（降级第二级）：离线全局视图拿不到请求期变量值
+ * （如 `{{model}}` 在无会话上下文的 assemble 中注册但无值），宿主严格渲染随之抛错。
+ * 容错语义＝与宿主同构的段级渲染，但未解析的 `{{name}}` 以原文保留并回报清单；
+ * 严格渲染成功时绝不走此路径（优先保证与宿主逐字节一致）。
+ */
+export function renderPromptTolerant(assembly: any): { text: string; unresolved: string[] } {
+  const variables = (assembly?.variables ?? {}) as Record<string, unknown>
+  const unresolved = new Set<string>()
+  const interp = (input: any): string => {
+    const text = String(input?.text ?? '')
+    if (input?.interpolate === false) return text
+    return text.replace(/\{\{([^{}]*)\}\}/g, (raw: string, name: string) => {
+      if (Object.hasOwn(variables, name) && variables[name] !== undefined) return String(variables[name])
+      unresolved.add(`{{${name}}}`)
+      return raw
+    })
+  }
+  const sections = (assembly?.sections ?? []).map(interp).filter((t: string) => t.length > 0)
+  return { text: sections.join('\n\n'), unresolved: [...unresolved] }
+}
+
+export async function readAssembly(
+  svc: { assemble: (context?: unknown) => Promise<unknown> },
+  loader?: RendererLoader,
+  root?: string | null,
+): Promise<AssemblyView> {
   const asm: any = await svc.assemble()
   let rendered: string | null = null
   let rendererAvailable = false
+  let renderNote: string | null = null
+  const useLoader: RendererLoader =
+    loader ??
+    (async () => {
+      try {
+        const mod = (await dynImport(RENDERER_SPEC)) as RendererModule
+        return typeof mod?.renderPrompt === 'function' ? mod : null
+      } catch (e) {
+        // 无 ctx 环境（如离线测试）时的兜底路径：失败可预期，仍留痕（#决策 2026-10-17 D2）
+        console.warn('[dsh-custom] 渲染器不可用（无 ctx 环境，渲染视图降级为原文）：', String((e as { message?: unknown })?.message ?? e))
+        return null
+      }
+    })
   try {
-    const mod = await dynImport('@deepseek-ai/dsh-system-prompt')
-    rendered = String(mod.renderPrompt(asm))
-    rendererAvailable = true
-  } catch {
-    // 宿主渲染器不可用时降级：仅给出分区原文（视图层标注「未渲染」）
-    rendered = null
+    const mod = await useLoader()
+    if (mod !== null) {
+      rendererAvailable = true
+      try {
+        rendered = String(mod.renderPrompt(asm)) // 严格渲染＝宿主请求期同法（逐字节）
+      } catch (strictError) {
+        const detail = String((strictError as { message?: unknown })?.message ?? strictError)
+        const fallback = renderPromptTolerant(asm)
+        rendered = fallback.text
+        renderNote =
+          `严格渲染被运行时变量阻止（离线全局视图无会话上下文）；已容错渲染为近似文本：` +
+          (fallback.unresolved.length > 0 ? `未解析变量 ${fallback.unresolved.join('、')} 以原文呈现` : '无未解析变量')
+        if (root !== undefined && root !== null) audit(root, { kind: 'render-tolerate', reason: detail, unresolved: fallback.unresolved })
+        console.warn('[dsh-custom] 严格渲染失败，已容错渲染：', detail)
+      }
+    }
+  } catch (e) {
+    console.warn('[dsh-custom] renderPrompt 调用失败（渲染视图降级为原文）：', String((e as { message?: unknown })?.message ?? e))
   }
-  return buildAssemblyView(asm, rendered, rendererAvailable)
+  return buildAssemblyView(asm, rendered, rendererAvailable, renderNote)
 }
 
 // ── 状态读取（存储 + 护栏计数）────────────────────────────────────
@@ -289,8 +442,10 @@ export function collectStatus(root: string, stats: GuardStats): StatusView {
       const st = statSync(join(root, name))
       mtime = st.mtime.toISOString()
       bytes = st.size
-    } catch {
-      // 文件不存在：hash 也会是 null
+    } catch (e) {
+      // 文件不存在（ENOENT）属常态：hash 也会是 null；其余失败须可见（#决策 2026-10-17 D2）
+      const code = (e as { code?: unknown })?.code
+      if (code !== 'ENOENT') console.warn(`[dsh-custom] 存储文件状态读取失败（${String(code ?? e)}）：${name}`)
     }
     return { name, hash: hashOfFile(join(root, name)), mtime, bytes }
   })
@@ -311,7 +466,7 @@ function jsonResponse(res: any, code: number, payload: unknown): void {
   res.end(body)
 }
 
-export function makeApi(root: string, getService: () => { assemble: (context?: unknown) => Promise<unknown> } | null, stats: GuardStats): (req: any, res: any) => void {
+export function makeApi(root: string, getService: () => { assemble: (context?: unknown) => Promise<unknown> } | null, stats: GuardStats, loader?: RendererLoader): (req: any, res: any) => void {
   return (req: any, res: any) => {
     const method = String(req?.method ?? 'GET').toUpperCase()
     if (method !== 'GET') {
@@ -325,7 +480,7 @@ export function makeApi(root: string, getService: () => { assemble: (context?: u
         jsonResponse(res, 503, { ok: false, error: 'systemPrompt 服务尚不可用（宿主未提供或尚未就绪）' })
         return
       }
-      readAssembly(svc)
+      readAssembly(svc, loader, root)
         .then((value) => jsonResponse(res, 200, { ok: true, value }))
         .catch((e: unknown) => jsonResponse(res, 500, { ok: false, error: String((e as { message?: unknown })?.message ?? e) }))
       return
@@ -361,8 +516,10 @@ export function apply(ctx: any): () => void {
     audit(root, { kind: 'sysprompt-attached' })
   })
 
+  const rendererLoader = makeRendererLoader(ctx, root)
+
   ctx.inject(['webServer'], (scoped: any) => {
-    const api = makeApi(root, () => service, stats)
+    const api = makeApi(root, () => service, stats, rendererLoader)
     scoped.effect(
       () => scoped.webServer.register({ kind: 'prefix', path: '/api/dsh-custom', handler: api }),
       'dsh-custom: api routes',

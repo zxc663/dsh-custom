@@ -2,7 +2,7 @@
 
 系统提示词管理插件：**看清**每次组装实际可用的官方系统提示词、**深改**其内容（整段接管）、并把纪律文本前置到 system 层。
 
-> 当前为 **P0**：存储骨架 ＋ 防静默改写护栏（拦截＋提示＋留痕）＋ HTTP 数据面＋浏览器半页签（插件设置区内「DSH自定义」）。
+> 当前为 **P0**：存储骨架 ＋ 防静默改写护栏（拦截＋提示＋留痕）＋ HTTP 数据面＋浏览器半（设置区「DSH自定义」独立条目）。
 > 深改（override / complete / 纪律注入）随 P1/P2 交付。设计档：
 > `D:/DeepSeek/dsh-plugin-dev/docs/design-specs/dsh-custom-prompt-design-20261017.md`
 > 交接文档（P0 现场、卡点、环境）：`D:/DeepSeek/dsh-plugin-dev/docs/handover-dsh-custom-20261017.md`
@@ -28,8 +28,8 @@ $DSH_HOME/dsh-custom/
 ## 数据面与界面（P0 已实现）
 
 - **HTTP 数据面（宿主半）**：`GET /api/dsh-custom/assembly`（实际装配视图：分区＋归属＋渲染全文）｜`GET /api/dsh-custom/status`（存储/护栏/会话外改动）。经 `ctx.inject(['webServer'])` 挂载（`server.register({kind:'prefix',…})`），浏览器半同源 fetch。
-- **浏览器半（`client.js`）**：`window.__ModuleLoader__.load` 形态（仅依赖宿主 externals：react）；注册 `settings.plugins.tab` 页签「DSH自定义」（id `dsh-custom`，order 60）；双视图＝装配全文（渲染）/分区源码；归属徽标 ours/official/other。
-- **已验证（2026-10-17，桌面 App 实测）**：启动行/存储落盘/API 200 全通。**待解决**：①桌面 App 内页签尚未出现；②宿主 `renderPrompt` 动态导入失败（渲染视图降级为原文）。详见交接文档。
+- **浏览器半（`client.js`）**：`window.__ModuleLoader__.load` 形态（仅依赖宿主 externals：react）；注册 `settings.section` 设置导航条目「DSH自定义」（id `dsh-custom`，order 30；2026-10-17 由「内置插件」分区页签移出——实机实测该页签本已注册可见，但入口层级过深、可见性不佳）；双视图＝装配全文（渲染）/分区源码；归属徽标 ours/official/other。
+- **已验证（2026-10-17，桌面 App 实测·收口轮）**：①入口＝设置导航区「DSH自定义」一级条目（`settings.section`，order 30）实机可见；②渲染视图在线：宿主渲染器经分层解析（`host-argv→ctx-baseUrl→loader-internal→module-url→bare`）取宿主同源副本（App＝asar 内 0.2.1-rc.1），严格渲染被运行时变量阻止时转容错渲染（未解析 `{{变量}}` 原文呈现＋标注＋audit `render-tolerate`）；③护栏负向控制通过：真模型写存储被 `guard-deny` 拦截＋audit 留痕＋文件零改动（fail-closed）；④存储落盘/API 200/状态页脚全通。证据：`D:\tmp\dsh-custom-smoke\shot-09/10/11/13`＋`audit.jsonl`。
 
 ## 护栏语义（已拍板：语义 b）
 
