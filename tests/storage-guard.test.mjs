@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import {
+  agentsCoexistence,
   buildAssemblyView,
   classifySectionName,
   collectStatus,
@@ -15,8 +16,13 @@ import {
   makeApi,
   makeRendererLoader,
   readAssembly,
+  readDiscipline,
+  readInjectSettings,
+  registerDiscipline,
   renderPromptTolerant,
   resolveHome,
+  saveDiscipline,
+  saveSettings,
   snapshot,
   squash,
   storageRoot,
@@ -137,7 +143,7 @@ console.log('E. 存储骨架（临时目录实战）')
 const tmp = mkdtempSync(join(tmpdir(), 'dsh-custom-test-'))
 try {
   const info = ensureStorage(tmp)
-  check('ensureStorage 建目录与四文件', info.created.length >= 5 && existsSync(join(tmp, 'discipline.md')) && existsSync(join(tmp, 'scope.json')))
+  check('ensureStorage 建目录与种子文件', info.created.length >= 6 && existsSync(join(tmp, 'discipline.md')) && existsSync(join(tmp, 'scope.json')) && existsSync(join(tmp, 'settings.json')))
   check('重复 ensureStorage 不再新建', ensureStorage(tmp).created.length === 0)
 
   check('首次 establish 后无外部改动告警', detectExternalChanges(tmp).length === 0)
@@ -153,7 +159,7 @@ try {
   check('backups 下出现快照目录', backups.length >= 1)
 
   const st = collectStatus(tmp, { denied: 2, touched: 3 })
-  check('collectStatus 汇总文件与护栏计数', st.files.length === 3 && st.guard.denied === 2 && st.files.every((f) => typeof f.hash === 'string'))
+  check('collectStatus 汇总文件与护栏计数', st.files.length === 4 && st.guard.denied === 2 && st.files.every((f) => typeof f.hash === 'string'))
 } finally {
   rmSync(tmp, { recursive: true, force: true })
 }
@@ -201,18 +207,33 @@ function fakeRes() {
     },
   }
 }
-function fakeReq(method, url) {
-  return { method, url }
+function fakeReq(method, url, body) {
+  const handlers = {}
+  const req = {
+    method,
+    url,
+    on(event, cb) {
+      handlers[event] = cb
+      return req
+    },
+  }
+  if (body !== undefined || method === 'PUT') {
+    queueMicrotask(() => {
+      if (body !== undefined) handlers.data?.(Buffer.from(String(body)))
+      handlers.end?.()
+    })
+  }
+  return req
 }
-async function callApi(api, method, url) {
+async function callApi(api, method, url, body) {
   const res = fakeRes()
   await new Promise((resolve) => {
     const origEnd = res.end.bind(res)
-    res.end = (body) => {
-      origEnd(body)
+    res.end = (body2) => {
+      origEnd(body2)
       resolve()
     }
-    api(fakeReq(method, url), res)
+    api(fakeReq(method, url, body), res)
   })
   return { code: res.code, json: res.body ? JSON.parse(res.body) : null }
 }
@@ -290,6 +311,72 @@ console.log('K. 容错渲染（严格渲染被运行时变量阻止时）')
   check('容错渲染带提示（含未解析变量）', typeof viewT.renderNote === 'string' && viewT.renderNote.includes('{{model}}'))
   const direct = renderPromptTolerant({ sections: [{ name: 'x', text: 'v={{provider}} u={{model}}' }], variables: { provider: 'opencode' } })
   check('renderPromptTolerant 替换已解析、保留未解析', direct.text === 'v=opencode u={{model}}' && direct.unresolved.join(',') === '{{model}}')
+}
+
+console.log('L. 纪律前置（读/存/开关/注册/共存）')
+{
+  const baseL = mkdtempSync(join(tmpdir(), 'dsh-custom-p1-'))
+  try {
+    ensureStorage(baseL)
+    check('settings.json 种子默认开', readInjectSettings(baseL).enabled === true)
+    check('空纪律 → 注入文本为空（不注入）', readDiscipline(baseL).text === '')
+    const saved = saveDiscipline(baseL, '# 纪律\n测试文本')
+    check('保存纪律落盘且返回新状态', saved.sourceText === '# 纪律\n测试文本' && readFileSync(join(baseL, 'discipline.md'), 'utf8') === '# 纪律\n测试文本')
+    check('保存后无会话外改动误报', detectExternalChanges(baseL).length === 0)
+    check('保存产生快照', readdirSync(join(baseL, 'backups')).length >= 1)
+    const off = saveSettings(baseL, { injectEnabled: false })
+    check('关开关 → 注入文本为空（纯净）', off.enabled === false && readDiscipline(baseL).text === '')
+    saveSettings(baseL, { injectEnabled: true })
+    check('开开关 → 注入文本=源文', readDiscipline(baseL).text === '# 纪律\n测试文本')
+
+    let captured = null
+    const fakeSvc = {
+      section: (s) => {
+        captured = s
+        return () => {}
+      },
+    }
+    const dispose = registerDiscipline(fakeSvc, baseL)
+    check('注册段名/顺序/原文标记正确', captured.name === 'dsh-custom:discipline' && captured.order === -2000 && captured.interpolate === false)
+    check('text() 反映当前文本', String(captured.text()) === '# 纪律\n测试文本')
+    saveSettings(baseL, { injectEnabled: false })
+    check('关后 text() 即空（热生效）', String(captured.text()) === '')
+    check('dispose 为函数', typeof dispose === 'function')
+
+    const homeL = join(baseL, 'home')
+    mkdirSync(homeL, { recursive: true })
+    check('AGENTS 共存：无文件', agentsCoexistence(homeL).exists === false)
+    writeFileSync(join(homeL, 'AGENTS.md'), '纪律文本', 'utf8')
+    check('AGENTS 共存：有文件（含字节数）', agentsCoexistence(homeL).exists === true && agentsCoexistence(homeL).bytes > 0)
+  } finally {
+    rmSync(baseL, { recursive: true, force: true })
+  }
+}
+
+console.log('M. HTTP 数据面（P1 端点：discipline/settings/agents）')
+{
+  const apiTmp2 = mkdtempSync(join(tmpdir(), 'dsh-custom-api2-'))
+  try {
+    ensureStorage(apiTmp2)
+    const api2 = makeApi(apiTmp2, () => svcFake, { denied: 0, touched: 0 })
+    const gd = await callApi(api2, 'GET', '/api/dsh-custom/discipline')
+    check('GET discipline 200 且默认开', gd.code === 200 && gd.json.ok === true && gd.json.value.enabled === true)
+    const pd = await callApi(api2, 'PUT', '/api/dsh-custom/discipline', JSON.stringify({ text: 'P1 纪律' }))
+    check('PUT discipline 200 且落盘', pd.code === 200 && readFileSync(join(apiTmp2, 'discipline.md'), 'utf8') === 'P1 纪律')
+    const badType = await callApi(api2, 'PUT', '/api/dsh-custom/discipline', JSON.stringify({ text: 42 }))
+    check('PUT discipline 非法体 → 400', badType.code === 400 && badType.json.ok === false)
+    const badJson = await callApi(api2, 'PUT', '/api/dsh-custom/discipline', '{oops')
+    check('PUT discipline 坏 JSON → 400', badJson.code === 400)
+    const ps = await callApi(api2, 'PUT', '/api/dsh-custom/settings', JSON.stringify({ injectEnabled: false }))
+    const gs = await callApi(api2, 'GET', '/api/dsh-custom/settings')
+    check('PUT/GET settings 开关往返', ps.code === 200 && ps.json.value.enabled === false && gs.json.value.enabled === false)
+    const ga = await callApi(api2, 'GET', '/api/dsh-custom/agents')
+    check('GET agents 200', ga.code === 200 && ga.json.ok === true && typeof ga.json.value.exists === 'boolean')
+    const m405 = await callApi(api2, 'POST', '/api/dsh-custom/discipline', '{}')
+    check('discipline 非 GET/PUT → 405', m405.code === 405)
+  } finally {
+    rmSync(apiTmp2, { recursive: true, force: true })
+  }
 }
 
 console.log(`\n结果：${pass} 通过 / ${fail} 失败`)

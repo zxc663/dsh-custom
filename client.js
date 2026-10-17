@@ -41,6 +41,9 @@ window.__ModuleLoader__.load({
 			'.dshc_kv dt{color:var(--dsw-alias-label-tertiary)}',
 			'.dshc_kv dd{margin:0;overflow-wrap:anywhere;color:var(--dsw-alias-label-secondary)}',
 			'.dshc_note{font-size:12px;line-height:18px}',
+			'.dshc_ta{border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-3);border-radius:10px;padding:10px 12px;min-height:120px;width:100%;box-sizing:border-box;color:var(--dsw-alias-label-primary);font-family:var(--ds-font-family-code,ui-monospace,monospace);font-size:12px;line-height:18px;resize:vertical}',
+			'.dshc_btn[data-on=true]{border-color:var(--dsw-alias-state-success-primary);color:var(--dsw-alias-state-success-primary)}',
+			'.dshc_h3{border-top:1px solid var(--dsw-alias-border-l2);padding-top:12px;margin-top:4px}',
 		].join('\n');
 		const CSS_TAG_ID = PLUGIN_ID + '/tab.css';
 		if (typeof document !== 'undefined' && document.querySelector('style[data-plugin-css=' + JSON.stringify(CSS_TAG_ID) + ']') === null) {
@@ -55,11 +58,17 @@ window.__ModuleLoader__.load({
 			try { return new URL('api/dsh-custom/', document.baseURI).pathname; } catch { return '/api/dsh-custom/'; }
 		})();
 
-		async function api(path, timeoutMs) {
+		async function api(path, options) {
+			const opts = options || {};
 			const ctrl = new AbortController();
-			const timer = setTimeout(() => ctrl.abort(), timeoutMs || 10000);
+			const timer = setTimeout(() => ctrl.abort(), opts.timeoutMs || 10000);
 			try {
-				const r = await fetch(base + path, { headers: { accept: 'application/json' }, redirect: 'error', signal: ctrl.signal });
+				const init = { headers: { accept: 'application/json' }, redirect: 'error', signal: ctrl.signal, method: opts.method || 'GET' };
+				if (opts.body !== undefined) {
+					init.headers['content-type'] = 'application/json';
+					init.body = JSON.stringify(opts.body);
+				}
+				const r = await fetch(base + path, init);
 				const text = await r.text();
 				let j = null;
 				try { j = JSON.parse(text); } catch { throw new Error('响应不是 JSON（HTTP ' + r.status + '）'); }
@@ -96,6 +105,12 @@ window.__ModuleLoader__.load({
 			const [mode, setMode] = useState('rendered');
 			const [view, setView] = useState(null);
 			const [status, setStatus] = useState(null);
+			const [disc, setDisc] = useState(null);
+			const [settings, setSettings] = useState(null);
+			const [agents, setAgents] = useState(null);
+			const [draft, setDraft] = useState(null);
+			const [saving, setSaving] = useState(false);
+			const [saveMsg, setSaveMsg] = useState(null);
 			const [error, setError] = useState(null);
 			const [loading, setLoading] = useState(false);
 
@@ -103,9 +118,13 @@ window.__ModuleLoader__.load({
 				setLoading(true);
 				setError(null);
 				try {
-					const results = await Promise.all([api('assembly'), api('status')]);
+					const results = await Promise.all([api('assembly'), api('status'), api('discipline'), api('settings'), api('agents')]);
 					setView(results[0]);
 					setStatus(results[1]);
+					setDisc(results[2]);
+					setSettings(results[3]);
+					setAgents(results[4]);
+					setDraft(results[2].sourceText);
 				} catch (e) {
 					setError(String((e && e.message) || e));
 				} finally {
@@ -114,10 +133,35 @@ window.__ModuleLoader__.load({
 			}, []);
 			useEffect(() => { void load(); }, [load]);
 
+			const saveDisc = useCallback(async () => {
+				setSaving(true);
+				setSaveMsg(null);
+				try {
+					const d = await api('discipline', { method: 'PUT', body: { text: draft == null ? '' : draft } });
+					setDisc(d);
+					setDraft(d.sourceText);
+					setSaveMsg('已保存（保存前已生成快照）');
+				} catch (e) {
+					setSaveMsg('保存失败：' + String((e && e.message) || e));
+				} finally {
+					setSaving(false);
+				}
+			}, [draft]);
+
+			const toggleInject = useCallback(async () => {
+				if (!settings) return;
+				try {
+					const s = await api('settings', { method: 'PUT', body: { injectEnabled: !settings.enabled } });
+					setSettings(s);
+				} catch (e) {
+					setError(String((e && e.message) || e));
+				}
+			}, [settings]);
+
 			const children = [];
 			children.push(
 				h('div', { className: 'dshc_header', key: 'head' },
-					h('h2', { className: 'dshc_title' }, 'DSH自定义 · 实际提示词（只读 · P0）'),
+					h('h2', { className: 'dshc_title' }, 'DSH自定义 · 系统提示词管理'),
 					h('button', { className: 'dshc_btn', onClick: () => void load(), disabled: loading, key: 'refresh' }, loading ? '刷新中…' : '刷新'),
 				),
 			);
@@ -178,6 +222,49 @@ window.__ModuleLoader__.load({
 					children.push(h('div', { className: 'dshc_meta', key: 'sum' }, extra.join(' ｜ ')));
 				}
 			}
+
+			children.push(
+				h('div', { className: 'dshc_header dshc_h3', key: 'h3' },
+					h('h2', { className: 'dshc_title' }, '区三 · 纪律前置（P1）'),
+					h('span', { className: 'dshc_spacer', style: { flex: 1 } }),
+					settings
+						? h('button', {
+								className: 'dshc_btn',
+								'data-on': settings.enabled,
+								onClick: () => void toggleInject(),
+								key: 'tgl',
+							}, settings.enabled ? '注入：已开启（点击关闭）' : '注入：已关闭（点击开启）')
+						: null,
+				),
+				h('div', { className: 'dshc_note', key: 'n3' },
+					settings && !settings.enabled
+						? '注入已关闭：模型只看到纯宿主提示词。'
+						: '纪律文本将作为 system 层前置段注入（order −2000，先于官方提示词）；空正文=不注入；改完下一条消息生效（热生效）。',
+				),
+				agents
+					? h('div', { className: 'dshc_note', key: 'ag' }, agents.exists
+							? '共存提示：检测到 $DSH_HOME/AGENTS.md（' + agents.bytes + ' 字节）——宿主原生通道；本插件不接管，仅信息提示。'
+							: '共存提示：未检测到 $DSH_HOME/AGENTS.md。')
+					: null,
+				h('div', { className: 'dshc_meta', key: 'prevL' },
+					'预览（保存后模型将看到的前 8 行）：',
+					h('pre', { className: 'dshc_pre', key: 'prevP' }, String(draft || '').split('\n').slice(0, 8).join('\n') || '（空）'),
+				),
+				h('textarea', {
+					className: 'dshc_ta',
+					key: 'ta',
+					value: draft == null ? '' : draft,
+					placeholder: '纪律文本（Markdown；空=不注入）',
+					spellCheck: false,
+					onChange: (e) => setDraft(e.target.value),
+				}),
+				h('div', { className: 'dshc_toolbar', key: 'bar3' },
+					h('button', { className: 'dshc_btn', onClick: () => void saveDisc(), disabled: saving || draft == null }, saving ? '保存中…' : '保存（快照＋落盘）'),
+					saveMsg ? h('span', { className: 'dshc_meta' }, saveMsg) : null,
+					h('span', { className: 'dshc_spacer', style: { flex: 1 } }),
+					h('span', { className: 'dshc_meta' }, disc && disc.mtime ? '纪律档案 mtime ' + fmtTime(disc.mtime) : '纪律档案不存在'),
+				),
+			);
 
 			if (status) {
 				const rows = [

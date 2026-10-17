@@ -111,9 +111,10 @@ const SEED_FILES: Record<string, string> = {
   'discipline.md': '',
   'override.md': '',
   'scope.json': '{\n  "version": 1,\n  "rules": []\n}\n',
+  'settings.json': '{\n  "version": 1,\n  "injectEnabled": true\n}\n',
 }
 
-const TRACKED = ['discipline.md', 'override.md', 'scope.json']
+const TRACKED = ['discipline.md', 'override.md', 'scope.json', 'settings.json']
 
 export function ensureStorage(root: string): StorageInfo {
   const created: string[] = []
@@ -210,6 +211,127 @@ export function snapshot(root: string, reason: string): string {
   }
   audit(root, { kind: 'snapshot', reason, dir, files: copied })
   return dir
+}
+
+// ── 纪律前置：存储读写 / 开关 / 段注册（P1；#决策 2026-10-17 16:38）──
+
+export const DISCIPLINE_SECTION = 'dsh-custom:discipline'
+export const DISCIPLINE_ORDER = -2000
+
+interface CachedFile { mtimeMs: number; text: string }
+const fileCache = new Map<string, CachedFile>()
+
+/** mtime 缓存的整文件读；变更即重读（热生效的底座）。 */
+function readCachedFile(p: string): { text: string; mtimeMs: number } | null {
+  try {
+    const st = statSync(p)
+    const hit = fileCache.get(p)
+    if (hit !== undefined && hit.mtimeMs === st.mtimeMs) return { text: hit.text, mtimeMs: hit.mtimeMs }
+    const text = readFileSync(p, 'utf8')
+    fileCache.set(p, { mtimeMs: st.mtimeMs, text })
+    return { text, mtimeMs: st.mtimeMs }
+  } catch (e) {
+    const code = (e as { code?: unknown })?.code
+    if (code !== 'ENOENT') console.warn(`[dsh-custom] 读取失败（${String(code ?? e)}）：${p}`)
+    fileCache.delete(p)
+    return null
+  }
+}
+
+/** 插件自身写入后登记哈希：避免下一次外部改动检测把本插件的写误报为会话外改动。 */
+function recordHashes(root: string, files: string[]): void {
+  const metaPath = join(root, 'meta.json')
+  let meta: { version?: number; hashes?: Record<string, string | null>; updatedAt?: string | null } = {}
+  try {
+    meta = JSON.parse(readFileSync(metaPath, 'utf8'))
+  } catch (e) {
+    const code = (e as { code?: unknown })?.code
+    if (code !== 'ENOENT') audit(root, { kind: 'meta-read-fail', detail: String(code ?? e) })
+    meta = {}
+  }
+  meta.version = 1
+  meta.hashes = meta.hashes ?? {}
+  for (const f of files) meta.hashes[f] = hashOfFile(join(root, f))
+  meta.updatedAt = new Date().toISOString()
+  try {
+    writeFileSync(metaPath, JSON.stringify(meta, null, 2) + '\n', 'utf8')
+  } catch (e) {
+    audit(root, { kind: 'meta-write-fail', detail: String((e as { message?: unknown })?.message ?? e) })
+  }
+}
+
+export interface InjectSettings { enabled: boolean }
+
+export function readInjectSettings(root: string): InjectSettings {
+  const f = readCachedFile(join(root, 'settings.json'))
+  if (f === null) return { enabled: true } // 缺失=默认开（设计 §8.4）
+  try {
+    return { enabled: (JSON.parse(f.text) as { injectEnabled?: unknown })?.injectEnabled !== false }
+  } catch (e) {
+    console.warn('[dsh-custom] settings.json 损坏，按默认（开）处理：', String((e as { message?: unknown })?.message ?? e))
+    return { enabled: true }
+  }
+}
+
+export interface DisciplineState {
+  enabled: boolean
+  text: string
+  sourceText: string
+  mtime: string | null
+}
+
+export function readDiscipline(root: string): DisciplineState {
+  detectExternalChanges(root) // 组装前哈希对照：会话外改动即留痕（设计 §4）
+  const md = readCachedFile(join(root, 'discipline.md'))
+  const sourceText = md?.text ?? ''
+  const cfg = readInjectSettings(root)
+  return {
+    enabled: cfg.enabled,
+    text: cfg.enabled ? sourceText : '',
+    sourceText,
+    mtime: md === null ? null : new Date(md.mtimeMs).toISOString(),
+  }
+}
+
+export function saveDiscipline(root: string, text: string): DisciplineState {
+  snapshot(root, 'save-discipline')
+  writeFileSync(join(root, 'discipline.md'), text, 'utf8')
+  recordHashes(root, ['discipline.md'])
+  audit(root, { kind: 'discipline-saved', bytes: Buffer.byteLength(text, 'utf8') })
+  return readDiscipline(root)
+}
+
+export function saveSettings(root: string, patch: { injectEnabled?: unknown }): InjectSettings {
+  const next = { enabled: typeof patch.injectEnabled === 'boolean' ? patch.injectEnabled : readInjectSettings(root).enabled }
+  writeFileSync(join(root, 'settings.json'), JSON.stringify({ version: 1, injectEnabled: next.enabled }, null, 2) + '\n', 'utf8')
+  recordHashes(root, ['settings.json'])
+  audit(root, { kind: 'settings-saved', injectEnabled: next.enabled })
+  return next
+}
+
+export function agentsCoexistence(home: string = resolveHome()): { exists: boolean; bytes: number | null; mtime: string | null } {
+  const p = join(home, 'AGENTS.md')
+  try {
+    const st = statSync(p)
+    return { exists: true, bytes: st.size, mtime: st.mtime.toISOString() }
+  } catch (e) {
+    const code = (e as { code?: unknown })?.code
+    if (code !== 'ENOENT') console.warn(`[dsh-custom] AGENTS.md 状态读取失败（${String(code ?? e)}）`)
+    return { exists: false, bytes: null, mtime: null }
+  }
+}
+
+/**
+ * 注册纪律前置段（system 层，order −2000 ⇒ 先于全官方面）。text 为函数：宿主每次组装时求值
+ * （=热生效，改完无需推送；关/空 → 空文本，渲染期自动剔除 ⇒ 模型只见纯宿主提示词）。
+ */
+export function registerDiscipline(svc: { section: (section: unknown) => () => void }, root: string): () => void {
+  return svc.section({
+    name: DISCIPLINE_SECTION,
+    order: DISCIPLINE_ORDER,
+    interpolate: false,
+    text: () => readDiscipline(root).text,
+  })
 }
 
 // ── 装配读取（只读视图数据面）────────────────────────────────────
@@ -466,15 +588,49 @@ function jsonResponse(res: any, code: number, payload: unknown): void {
   res.end(body)
 }
 
+function readJsonBody(req: any, limit = 1024 * 1024): Promise<Record<string, unknown>> {
+  return new Promise((resolve, reject) => {
+    let size = 0
+    const chunks: Buffer[] = []
+    req.on('data', (c: Buffer) => {
+      size += c.length
+      if (size > limit) {
+        reject(new Error(`请求体过大（>${String(limit)} 字节）`))
+        return
+      }
+      chunks.push(c)
+    })
+    req.on('end', () => {
+      const raw = Buffer.concat(chunks).toString('utf8')
+      if (raw.trim().length === 0) {
+        resolve({})
+        return
+      }
+      try {
+        const parsed = JSON.parse(raw)
+        resolve(parsed !== null && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : {})
+      } catch (e) {
+        reject(new Error(`请求体不是 JSON：${String((e as { message?: unknown })?.message ?? e)}`))
+      }
+    })
+    req.on('error', (e: unknown) => reject(e instanceof Error ? e : new Error(String(e))))
+  })
+}
+
 export function makeApi(root: string, getService: () => { assemble: (context?: unknown) => Promise<unknown> } | null, stats: GuardStats, loader?: RendererLoader): (req: any, res: any) => void {
+  const handlePut = (req: any, res: any, run: (body: Record<string, unknown>) => unknown): void => {
+    readJsonBody(req)
+      .then((body) => jsonResponse(res, 200, { ok: true, value: run(body) }))
+      .catch((e: unknown) => jsonResponse(res, 400, { ok: false, error: String((e as { message?: unknown })?.message ?? e) }))
+  }
   return (req: any, res: any) => {
     const method = String(req?.method ?? 'GET').toUpperCase()
-    if (method !== 'GET') {
-      jsonResponse(res, 405, { ok: false, error: 'method not allowed' })
-      return
-    }
     const pathname = String(req?.url ?? '').split('?')[0].replace(/\/+$/, '') || '/'
     if (pathname === '/api/dsh-custom/assembly') {
+      if (method !== 'GET') {
+        jsonResponse(res, 405, { ok: false, error: 'method not allowed' })
+        return
+      }
       const svc = getService()
       if (!svc) {
         jsonResponse(res, 503, { ok: false, error: 'systemPrompt 服务尚不可用（宿主未提供或尚未就绪）' })
@@ -486,11 +642,50 @@ export function makeApi(root: string, getService: () => { assemble: (context?: u
       return
     }
     if (pathname === '/api/dsh-custom/status') {
+      if (method !== 'GET') {
+        jsonResponse(res, 405, { ok: false, error: 'method not allowed' })
+        return
+      }
       try {
         jsonResponse(res, 200, { ok: true, value: collectStatus(root, stats) })
       } catch (e: unknown) {
         jsonResponse(res, 500, { ok: false, error: String((e as { message?: unknown })?.message ?? e) })
       }
+      return
+    }
+    if (pathname === '/api/dsh-custom/discipline') {
+      if (method === 'GET') {
+        jsonResponse(res, 200, { ok: true, value: readDiscipline(root) })
+        return
+      }
+      if (method === 'PUT') {
+        handlePut(req, res, (body) => {
+          if (typeof body.text !== 'string') throw new Error('text 必须是字符串')
+          return saveDiscipline(root, body.text)
+        })
+        return
+      }
+      jsonResponse(res, 405, { ok: false, error: 'method not allowed' })
+      return
+    }
+    if (pathname === '/api/dsh-custom/settings') {
+      if (method === 'GET') {
+        jsonResponse(res, 200, { ok: true, value: readInjectSettings(root) })
+        return
+      }
+      if (method === 'PUT') {
+        handlePut(req, res, (body) => saveSettings(root, { injectEnabled: body.injectEnabled }))
+        return
+      }
+      jsonResponse(res, 405, { ok: false, error: 'method not allowed' })
+      return
+    }
+    if (pathname === '/api/dsh-custom/agents') {
+      if (method !== 'GET') {
+        jsonResponse(res, 405, { ok: false, error: 'method not allowed' })
+        return
+      }
+      jsonResponse(res, 200, { ok: true, value: agentsCoexistence() })
       return
     }
     jsonResponse(res, 404, { ok: false, error: 'not found' })
@@ -513,7 +708,8 @@ export function apply(ctx: any): () => void {
   let service: { assemble: (context?: unknown) => Promise<unknown> } | null = null
   ctx.inject(['systemPrompt'], (scoped: any) => {
     service = scoped.systemPrompt
-    audit(root, { kind: 'sysprompt-attached' })
+    scoped.effect(() => registerDiscipline(scoped.systemPrompt, root), 'dsh-custom: discipline section')
+    audit(root, { kind: 'sysprompt-attached', section: DISCIPLINE_SECTION, order: DISCIPLINE_ORDER })
   })
 
   const rendererLoader = makeRendererLoader(ctx, root)
