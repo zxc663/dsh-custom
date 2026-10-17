@@ -1,0 +1,37 @@
+{
+  "feature": "dsh-custom-prompt-redesign",
+  "tier": 3,
+  "initial": "ready",
+  "states": {
+    "ready": {"on": {"selectScope": "loadingAssembly", "openOverride": "overrideOff", "openDiscipline": "disciplineReady", "refresh": "loadingAssembly"}},
+    "loadingAssembly": {"on": {"success": "ready", "error": "assemblyError", "cancel": "ready"}},
+    "assemblyError": {"type": "error", "on": {"retry": "loadingAssembly", "back": "ready"}},
+    "overrideOff": {"on": {"edit": "overrideDraft", "enable": "checkingConflict", "back": "ready"}},
+    "overrideDraft": {"on": {"edit": "overrideDraft", "save": "validatingOverride", "back": "overrideOff"}},
+    "validatingOverride": {"on": {"pass": "overrideSaved", "unknownVariable": "overrideError", "conflict": "overrideError", "writeFail": "overrideError", "cancel": "overrideDraft"}},
+    "overrideError": {"type": "error", "on": {"edit": "overrideDraft", "retry": "validatingOverride", "back": "overrideDraft"}},
+    "overrideSaved": {"on": {"enable": "checkingConflict", "edit": "overrideDraft", "rollback": "snapshotting", "back": "ready"}},
+    "checkingConflict": {"on": {"pass": "overrideEnabled", "conflict": "overrideError", "empty": "overrideError", "error": "overrideError", "cancel": "overrideSaved"}},
+    "overrideEnabled": {"on": {"disable": "overrideOff", "edit": "overrideDraft", "rollback": "snapshotting", "back": "ready"}},
+    "snapshotting": {"on": {"success": "restoring", "error": "restoreError", "cancel": "overrideSaved"}},
+    "restoring": {"on": {"success": "overrideSaved", "error": "restoreError", "cancel": "overrideSaved"}},
+    "restoreError": {"type": "error", "on": {"retry": "snapshotting", "back": "overrideSaved"}},
+    "disciplineReady": {"on": {"edit": "disciplineDraft", "toggle": "disciplineSaving", "scope": "scopeReady", "back": "ready"}},
+    "disciplineDraft": {"on": {"edit": "disciplineDraft", "save": "disciplineSaving", "back": "disciplineReady"}},
+    "disciplineSaving": {"on": {"success": "disciplineSaved", "error": "disciplineError", "cancel": "disciplineDraft"}},
+    "disciplineError": {"type": "error", "on": {"retry": "disciplineSaving", "edit": "disciplineDraft", "back": "disciplineReady"}},
+    "disciplineSaved": {"on": {"edit": "disciplineDraft", "toggle": "disciplineSaving", "scope": "scopeReady", "back": "ready"}},
+    "scopeReady": {"on": {"add": "scopeDraft", "edit": "scopeDraft", "save": "scopeSaving", "back": "disciplineReady"}},
+    "scopeDraft": {"on": {"add": "scopeDraft", "edit": "scopeDraft", "save": "scopeSaving", "back": "scopeReady"}},
+    "scopeSaving": {"on": {"success": "scopeSaved", "error": "scopeError", "cancel": "scopeDraft"}},
+    "scopeError": {"type": "error", "on": {"retry": "scopeSaving", "edit": "scopeDraft", "back": "scopeReady"}},
+    "scopeSaved": {"on": {"add": "scopeDraft", "edit": "scopeDraft", "save": "scopeSaving", "back": "disciplineReady"}}
+  },
+  "recovery": [
+    {"error": "assemblyError", "path": "retry"},
+    {"error": "overrideError", "path": "edit or retry"},
+    {"error": "restoreError", "path": "retry or back"},
+    {"error": "disciplineError", "path": "retry or edit"},
+    {"error": "scopeError", "path": "retry or edit"}
+  ]
+}

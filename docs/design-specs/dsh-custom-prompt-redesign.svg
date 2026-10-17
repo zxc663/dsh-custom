@@ -1,0 +1,119 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1040" viewBox="0 0 1600 1040" role="img" aria-labelledby="title desc">
+  <title id="title">DSH自定义系统提示词管理重构设计图</title>
+  <desc id="desc">Prompt Observatory 工作台：左侧功能导航，中间真实装配检查器，右侧影响面和恢复证据。</desc>
+  <defs>
+    <linearGradient id="accent" x1="0" x2="1"><stop stop-color="#6E9BFF"/><stop offset="1" stop-color="#9B7BFF"/></linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%"><feDropShadow dx="0" dy="12" stdDeviation="16" flood-color="#000" flood-opacity=".22"/></filter>
+    <style>
+      .ui{font-family:Inter,Segoe UI,Arial,sans-serif}.mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace}.muted{fill:#8994AA}.text{fill:#E9EDF5}.small{font-size:13px}.tiny{font-size:11px}.label{font-size:12px;letter-spacing:.08em;text-transform:uppercase}.h1{font-size:25px;font-weight:700}.h2{font-size:16px;font-weight:650}.body{font-size:14px}.line{stroke:#2A3448;stroke-width:1}.card{fill:#151C2A;stroke:#2A3448}.pill{fill:#202A40}.blue{fill:#8AAEFF}.green{fill:#59D7A2}.amber{fill:#F3C86B}.red{fill:#FF7F91}
+    </style>
+  </defs>
+  <rect width="1600" height="1040" fill="#0D121C"/>
+  <rect x="0" y="0" width="1600" height="64" fill="#111825"/>
+  <rect x="0" y="64" width="252" height="976" fill="#111722"/>
+  <path d="M252 64H1600" class="line"/>
+
+  <!-- top bar -->
+  <g class="ui">
+    <text x="32" y="38" class="text h2">DSH自定义</text>
+    <text x="177" y="38" class="muted small">系统提示词管理</text>
+    <text x="286" y="38" class="muted small">设置 / DSH 自定义</text>
+    <rect x="1408" y="19" width="70" height="28" rx="7" fill="#202A40" stroke="#36435D"/>
+    <text x="1443" y="37" text-anchor="middle" class="text small">刷新</text>
+    <circle cx="1517" cy="33" r="13" fill="#202A40"/><text x="1517" y="37" text-anchor="middle" class="blue body">?</text>
+  </g>
+
+  <!-- sidebar -->
+  <g class="ui">
+    <text x="28" y="104" class="muted label">工作台</text>
+    <rect x="16" y="122" width="220" height="45" rx="9" fill="#27365A"/>
+    <rect x="16" y="122" width="3" height="45" rx="2" fill="#8AAEFF"/>
+    <text x="38" y="150" class="text body">◈</text><text x="64" y="150" class="text body">概览</text><text x="205" y="150" class="blue small">主</text>
+    <text x="38" y="203" class="muted body">◇</text><text x="64" y="203" class="muted body">接管官方</text><text x="190" y="203" class="amber tiny">高级</text>
+    <text x="38" y="248" class="muted body">◇</text><text x="64" y="248" class="muted body">纪律前置</text>
+    <text x="38" y="293" class="muted body">◇</text><text x="64" y="293" class="muted body">证据与状态</text>
+    <path d="M28 330H224" class="line"/>
+    <text x="28" y="363" class="muted label">当前原则</text>
+    <text x="28" y="396" class="muted small">先看真实装配</text>
+    <text x="28" y="422" class="muted small">再改变内容</text>
+    <text x="28" y="448" class="muted small">保存前快照 · 可回滚</text>
+    <rect x="18" y="892" width="216" height="108" rx="10" fill="#151C2A" stroke="#2A3448"/>
+    <text x="34" y="920" class="muted tiny">数据源</text><text x="34" y="943" class="text small mono">systemPrompt.assemble()</text>
+    <text x="34" y="970" class="muted tiny">存储</text><text x="34" y="990" class="text tiny mono">~/.dsh/dsh-custom/</text>
+  </g>
+
+  <!-- main -->
+  <g class="ui">
+    <text x="292" y="112" class="muted label">PROMPT OBSERVATORY / LIVE ASSEMBLY</text>
+    <text x="292" y="150" class="text h1">当前实际装配</text>
+    <text x="292" y="178" class="muted body">先确认模型现在看到什么，再决定是否修改。</text>
+
+    <!-- fingerprint -->
+    <rect x="292" y="202" width="958" height="94" rx="12" fill="#151E31" stroke="#3B527E"/>
+    <rect x="292" y="202" width="5" height="94" rx="2" fill="url(#accent)"/>
+    <text x="316" y="228" class="muted tiny">装配指纹 · 生成于 19:22:08</text>
+    <text x="316" y="263" class="text h2 mono">GLOBAL / STANDARD</text>
+    <text x="600" y="254" class="blue h2">22</text><text x="600" y="275" class="muted tiny">段</text>
+    <text x="700" y="254" class="text h2">14</text><text x="700" y="275" class="muted tiny">工具</text>
+    <text x="800" y="254" class="text h2">2</text><text x="800" y="275" class="muted tiny">上下文</text>
+    <text x="900" y="254" class="text h2">5</text><text x="900" y="275" class="muted tiny">变量</text>
+    <circle cx="1084" cy="252" r="5" fill="#59D7A2"/><text x="1098" y="257" class="green small">渲染器在线</text>
+    <text x="1098" y="278" class="muted tiny">Host assembly 真值</text>
+
+    <!-- toolbar -->
+    <rect x="292" y="320" width="958" height="58" rx="10" class="card"/>
+    <rect x="308" y="333" width="210" height="32" rx="7" fill="#202A40"/>
+    <rect x="310" y="335" width="102" height="28" rx="5" fill="#3A4D78"/>
+    <text x="361" y="354" text-anchor="middle" class="text small">渲染全文</text><text x="466" y="354" text-anchor="middle" class="muted small">分区源码</text>
+    <rect x="548" y="333" width="246" height="32" rx="7" fill="#111722" stroke="#2A3448"/>
+    <text x="565" y="354" class="muted tiny">作用域</text><text x="625" y="354" class="text small">全局（未附着会话）⌄</text>
+    <text x="1034" y="354" class="muted small">复制全文</text><text x="1170" y="354" class="blue small">查看证据 →</text>
+
+    <!-- prompt panel -->
+    <rect x="292" y="400" width="958" height="472" rx="12" class="card" filter="url(#shadow)"/>
+    <rect x="316" y="424" width="910" height="41" rx="7" fill="#101722"/>
+    <text x="334" y="450" class="muted tiny">SYSTEM PROMPT / READ ONLY</text><text x="1092" y="450" class="muted tiny">2,741 字</text>
+    <text x="334" y="496" class="muted tiny mono">01  harness:identity</text>
+    <text x="334" y="523" class="text small mono">You are DeepSeek Harness, an agent runtime…</text>
+    <text x="334" y="563" class="muted tiny mono">02  dsh-custom:discipline</text><rect x="525" y="550" width="66" height="20" rx="5" fill="#213B42"/><text x="558" y="565" text-anchor="middle" class="green tiny">本插件</text>
+    <text x="334" y="590" class="text small mono">工程纪律：每个新任务第一产物是复述…</text>
+    <text x="334" y="630" class="muted tiny mono">03  persona:prefix</text><rect x="450" y="617" width="48" height="20" rx="5" fill="#29332A"/><text x="474" y="632" text-anchor="middle" class="green tiny">官方</text>
+    <text x="334" y="657" class="text small mono">Use the following operating context…</text>
+    <text x="334" y="697" class="muted tiny mono">04  tools:catalog</text><rect x="450" y="684" width="66" height="20" rx="5" fill="#242A36"/><text x="483" y="699" text-anchor="middle" class="muted tiny">其它外部</text>
+    <text x="334" y="724" class="text small mono">Available tools and their exact contracts…</text>
+    <path d="M334 753H1172" class="line"/>
+    <text x="334" y="780" class="muted tiny">显示 4 / 22 段 · 点击段名查看完整正文与来源</text>
+    <text x="1058" y="780" class="blue tiny">展开全部 ↓</text>
+    <rect x="316" y="814" width="910" height="34" rx="6" fill="#182233"/>
+    <circle cx="336" cy="831" r="4" fill="#59D7A2"/><text x="350" y="835" class="green tiny">此视图与 Host assemble() 同一份数据</text>
+  </g>
+
+  <!-- right rail -->
+  <g class="ui">
+    <rect x="1280" y="96" width="286" height="776" rx="12" class="card"/>
+    <text x="1304" y="132" class="muted label">IMPACT / RECOVERY</text>
+    <text x="1304" y="168" class="text h2">影响面</text>
+    <path d="M1304 185H1542" class="line"/>
+    <text x="1304" y="218" class="muted tiny">纪律前置</text><text x="1402" y="218" class="green small">已开启</text>
+    <text x="1304" y="250" class="muted tiny">深度接管</text><text x="1402" y="250" class="muted small">已关闭</text>
+    <text x="1304" y="290" class="muted tiny">生效时机</text><text x="1304" y="312" class="text small">下一次真实组装</text>
+    <rect x="1304" y="346" width="238" height="84" rx="8" fill="#1A2732" stroke="#2D5A55"/>
+    <circle cx="1326" cy="372" r="5" fill="#59D7A2"/><text x="1340" y="377" class="green small">当前状态可信</text>
+    <text x="1320" y="400" class="muted tiny">来源与内容在同一次 Host assembly</text>
+    <text x="1320" y="418" class="muted tiny">中读取，未使用模型自述。</text>
+    <text x="1304" y="472" class="text h2">可恢复</text>
+    <path d="M1304 489H1542" class="line"/>
+    <text x="1304" y="522" class="muted small">关闭纪律注入</text><text x="1500" y="522" class="blue tiny">去设置 →</text>
+    <text x="1304" y="554" class="muted small">停用 complete</text><text x="1500" y="554" class="blue tiny">去设置 →</text>
+    <text x="1304" y="586" class="muted small">查看历史快照</text><text x="1500" y="586" class="blue tiny">去证据 →</text>
+    <text x="1304" y="642" class="text h2">当前边界</text>
+    <path d="M1304 659H1542" class="line"/>
+    <text x="1304" y="692" class="muted tiny">文件权威</text><text x="1402" y="692" class="text tiny mono">~/.dsh/dsh-custom</text>
+    <text x="1304" y="722" class="muted tiny">外部改动</text><text x="1402" y="722" class="green tiny">未发现</text>
+    <text x="1304" y="752" class="muted tiny">渲染模式</text><text x="1402" y="752" class="text tiny">严格</text>
+    <text x="1304" y="818" class="blue small">查看完整证据与审计 →</text>
+  </g>
+
+  <!-- footer note -->
+  <g class="ui"><text x="292" y="930" class="muted tiny">设计签名：Prompt Observatory · 内容先于装饰 · 高影响操作二级进入 · 所有异常都有恢复出口</text><text x="292" y="964" class="muted tiny">静态设计图，不代表当前 dsh-custom 已在本 profile live 挂载；入口与 Slot 需实现前重新 Inspect。</text></g>
+</svg>

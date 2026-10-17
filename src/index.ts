@@ -4,12 +4,12 @@
 //   ③ 装配读取：ctx.systemPrompt.assemble() → 分区归属 + renderPrompt 实际渲染（只读）
 //   ④ HTTP 数据面：/api/dsh-custom/{assembly,status}（webServer 服务；浏览器半 client.js 消费）
 // 设计档：D:/DeepSeek/dsh-plugin-dev/docs/design-specs/dsh-custom-prompt-design-20261017.md
-import { appendFileSync, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { appendFileSync, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { createRequire } from 'node:module'
 import { homedir } from 'node:os'
 import { join, resolve, sep } from 'node:path'
-import { pathToFileURL } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 // ── 路径与会话外定位 ──────────────────────────────────────────────
 
@@ -303,6 +303,171 @@ export function saveDiscipline(root: string, text: string): DisciplineState {
   recordHashes(root, ['discipline.md'])
   audit(root, { kind: 'discipline-saved', bytes: Buffer.byteLength(text, 'utf8') })
   return readDiscipline(root)
+}
+
+// ── P5：用户自定义提示词段（user-prompt.md——与常驻核心区分，可开关；空=不注入）──
+// 装配序：常驻核心(-2000) → 我的提示词(-1990) → 官方面(0)。
+export const USER_PROMPT_SECTION = 'dsh-custom:user-prompt'
+export const USER_PROMPT_ORDER = -1990
+
+export function userPromptSectionName(): string {
+  return USER_PROMPT_SECTION
+}
+
+export interface UserPromptState {
+  enabled: boolean
+  text: string
+  mtime: string | null
+}
+
+export function readUserPrompt(root: string): UserPromptState {
+  const f = readCachedFile(join(root, 'user-prompt.md'))
+  const j = readSettingsJson(root)
+  return {
+    enabled: j?.userPromptEnabled !== false,
+    text: f?.text ?? '',
+    mtime: f === null ? null : new Date(f.mtimeMs).toISOString(),
+  }
+}
+
+function readSettingsJson(root: string): { injectEnabled?: boolean; overrideEnabled?: boolean; userPromptEnabled?: boolean } | null {
+  const f = readCachedFile(join(root, 'settings.json'))
+  if (f === null) return null
+  try {
+    return JSON.parse(f.text)
+  } catch {
+    return null
+  }
+}
+
+export function saveUserPrompt(root: string, text: string, enabled = true): UserPromptState {
+  snapshot(root, 'save-user-prompt')
+  writeFileSync(join(root, 'user-prompt.md'), text, 'utf8')
+  const merged = { ...(readSettingsJson(root) ?? {}), userPromptEnabled: enabled }
+  writeFileSync(join(root, 'settings.json'), JSON.stringify(merged, null, 2) + '\n', 'utf8')
+  recordHashes(root, ['user-prompt.md'])
+  audit(root, { kind: 'user-prompt-saved', bytes: Buffer.byteLength(text, 'utf8'), enabled })
+  return readUserPrompt(root)
+}
+
+/** 组装期求值：开+非空→文本；否则空串（渲染期自动剔除）。 */
+export function userPromptTextFor(root: string): string {
+  const st = readUserPrompt(root)
+  return st.enabled ? st.text : ''
+}
+
+// ── P4/P5：渐进加载层管理（出厂=包内 content/layered 副本；用户改动落 $root/layered/）──
+// 启用状态表 layered-state.json（分节名→bool；缺失=启用）。分节名白名单=出厂清单（防越权路径）。
+export interface LayeredSectionView {
+  name: string
+  force: 'M' | 'S' | 'X'
+  enabled: boolean
+  modified: boolean
+  chars: number
+  text: string
+}
+
+const FACTORY_LAYERED_DIR = fileURLToPath(new URL('../content/layered/', import.meta.url))
+
+function factoryLayeredNames(): string[] {
+  try {
+    return readdirSync(FACTORY_LAYERED_DIR)
+      .filter((f) => f.endsWith('.md'))
+      .sort()
+  } catch {
+    return []
+  }
+}
+
+/** 从 00-加载清单.md 提取分节强制级（M/S；提取不到=按文件名映射兜底，再不济=S）。 */
+function forceOfSection(name: string): 'M' | 'S' | 'X' {
+  const manifest = readCachedFile(join(FACTORY_LAYERED_DIR, '00-加载清单.md'))?.text ?? ''
+  const esc = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const bar = String.fromCharCode(96) // 反引号（模板串内不可直书）
+  const re = new RegExp('(?:^|\\s)[|' + bar + ']?\\s*' + esc + '\\s*[|' + bar + '].*?\\|\\s*([MSX])\\s*[|' + bar + ']', 'm')
+  const m = manifest.match(re)
+  if (m && ['M', 'S', 'X'].includes(m[1])) return m[1] as 'M' | 'S' | 'X'
+  if (/l2f|l2s|clarify|docking|compression|goal/.test(name)) return 'M'
+  return 'S'
+}
+
+function readLayeredState(root: string): Record<string, boolean> {
+  const f = readCachedFile(join(root, 'layered-state.json'))
+  if (f === null) return {}
+  try {
+    const j = JSON.parse(f.text) as { enabled?: Record<string, boolean> }
+    return j?.enabled && typeof j.enabled === 'object' ? j.enabled : {}
+  } catch {
+    return {}
+  }
+}
+
+function writeLayeredState(root: string, st: Record<string, boolean>): void {
+  writeFileSync(join(root, 'layered-state.json'), JSON.stringify({ version: 1, enabled: st }, null, 2) + '\n', 'utf8')
+}
+
+function safeLayeredName(name: string): string | null {
+  const n = String(name ?? '').trim()
+  if (!/^[A-Za-z0-9._\-]+\.md$/.test(n)) return null
+  if (!factoryLayeredNames().includes(n)) return null
+  return n
+}
+
+export function listLayered(root: string): { sections: LayeredSectionView[] } {
+  const st = readLayeredState(root)
+  const sections = factoryLayeredNames().map((name) => {
+    const userPath = join(root, 'layered', name)
+    let text = readFileSync(join(FACTORY_LAYERED_DIR, name), 'utf8')
+    let modified = false
+    try {
+      if (existsSync(userPath)) {
+        text = readFileSync(userPath, 'utf8')
+        modified = true
+      }
+    } catch { /* 读不到用户副本=出厂 */ }
+    return { name, force: forceOfSection(name), enabled: st[name] !== false, modified, chars: text.length, text }
+  })
+  return { sections }
+}
+
+export function readLayeredSection(root: string, name: string): LayeredSectionView | null {
+  const n = safeLayeredName(name)
+  if (n === null) return null
+  const hit = listLayered(root).sections.find((s) => s.name === n)
+  return hit ?? null
+}
+
+export function saveLayeredSection(root: string, name: string, text: string): LayeredSectionView | null {
+  const n = safeLayeredName(name)
+  if (n === null) throw new Error(`分节名不合法（不在出厂清单）：${String(name)}`)
+  snapshot(root, 'save-layered')
+  mkdirSync(join(root, 'layered'), { recursive: true })
+  writeFileSync(join(root, 'layered', n), text, 'utf8')
+  audit(root, { kind: 'layered-saved', section: n, bytes: Buffer.byteLength(text, 'utf8') })
+  return readLayeredSection(root, n)
+}
+
+export function resetLayeredSection(root: string, name: string): LayeredSectionView | null {
+  const n = safeLayeredName(name)
+  if (n === null) return null
+  const p = join(root, 'layered', n)
+  if (existsSync(p)) {
+    snapshot(root, 'reset-layered')
+    rmSync(p, { force: true })
+  }
+  audit(root, { kind: 'layered-reset', section: n })
+  return readLayeredSection(root, n)
+}
+
+export function toggleLayeredSection(root: string, name: string, enabled: boolean): LayeredSectionView | null {
+  const n = safeLayeredName(name)
+  if (n === null) return null
+  const st = readLayeredState(root)
+  if (enabled) delete st[n]
+  else st[n] = false
+  writeLayeredState(root, st)
+  audit(root, { kind: 'layered-toggle', section: n, enabled })
+  return readLayeredSection(root, n)
 }
 
 // ── 作用域覆盖（P1b；#决策 2026-10-17 17:2x）：全局默认＋单工作区可覆盖 ──
@@ -962,6 +1127,64 @@ export function makeApi(
       jsonResponse(res, 405, { ok: false, error: 'method not allowed' })
       return
     }
+    // ── P4/P5：我的提示词（user-prompt）──
+    if (pathname === '/api/dsh-custom/user-prompt') {
+      if (method === 'GET') {
+        jsonResponse(res, 200, { ok: true, value: readUserPrompt(root) })
+        return
+      }
+      if (method === 'PUT') {
+        handlePut(req, res, (body) => {
+          if (typeof body.text !== 'string') throw new Error('text 必须是字符串')
+          return saveUserPrompt(root, body.text, body.enabled !== false)
+        })
+        return
+      }
+      jsonResponse(res, 405, { ok: false, error: 'method not allowed' })
+      return
+    }
+    // ── P4/P5：渐进加载层管理 ──
+    if (pathname === '/api/dsh-custom/layered') {
+      if (method === 'GET') {
+        jsonResponse(res, 200, { ok: true, value: listLayered(root) })
+        return
+      }
+      jsonResponse(res, 405, { ok: false, error: 'method not allowed' })
+      return
+    }
+    {
+      const mSec = pathname.match(/^\/api\/dsh-custom\/layered\/([^/]+)$/)
+      if (mSec !== null) {
+        const secName = decodeURIComponent(mSec[1])
+        if (method === 'GET') {
+          const v = readLayeredSection(root, secName)
+          if (v === null) jsonResponse(res, 404, { ok: false, error: '分节不存在（不在出厂清单）' })
+          else jsonResponse(res, 200, { ok: true, value: v })
+          return
+        }
+        if (method === 'PUT') {
+          handlePut(req, res, (body) => {
+            if (typeof body.text !== 'string') throw new Error('text 必须是字符串')
+            const v = saveLayeredSection(root, secName, body.text)
+            if (v === null) throw new Error('分节不存在（不在出厂清单）')
+            return v
+          })
+          return
+        }
+        jsonResponse(res, 405, { ok: false, error: 'method not allowed' })
+        return
+      }
+      const mAct = pathname.match(/^\/api\/dsh-custom\/layered\/([^/]+)\/(reset|toggle)$/)
+      if (mAct !== null && method === 'POST') {
+        handlePut(req, res, (body) => {
+          const secName = decodeURIComponent(mAct[1])
+          const v = mAct[2] === 'reset' ? resetLayeredSection(root, secName) : toggleLayeredSection(root, secName, body.enabled !== false)
+          if (v === null) throw new Error('分节不存在（不在出厂清单）')
+          return v
+        })
+        return
+      }
+    }
     if (pathname === '/api/dsh-custom/settings') {
       if (method === 'GET') {
         jsonResponse(res, 200, { ok: true, value: readInjectSettings(root) })
@@ -1166,6 +1389,18 @@ export function apply(ctx: any): () => void {
     service = scoped.systemPrompt
     scoped.effect(() => registerDiscipline(scoped.systemPrompt, root), 'dsh-custom: discipline section')
     audit(root, { kind: 'sysprompt-attached', section: DISCIPLINE_SECTION, order: DISCIPLINE_ORDER })
+    // P5：我的提示词段（装配序：常驻核心(-2000)→我的提示词(-1990)→官方(0)；空/关=空文本自动剔除）
+    scoped.effect(
+      () =>
+        scoped.systemPrompt.section({
+          name: USER_PROMPT_SECTION,
+          order: USER_PROMPT_ORDER,
+          interpolate: false,
+          text: () => userPromptTextFor(root),
+        }),
+      'dsh-custom: user-prompt section',
+    )
+    audit(root, { kind: 'sysprompt-attached', section: USER_PROMPT_SECTION, order: USER_PROMPT_ORDER })
     syncOverride()
   })
 
