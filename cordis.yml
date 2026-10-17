@@ -1,0 +1,5 @@
+# 开发态挂载示例（临时 insert；按「撤除清单」铁律登记：撤除条件/撤除动作/撤除后复验判据）
+# 用法：把下面 insert 合入目标 profile 的 cordis.patch.yml 后重启宿主；file:// 直载工作树 .ts。
+- insert:
+    - id: dsh-custom
+      name: 'file:///D:/DeepSeek/dsh-custom/src/index.ts'

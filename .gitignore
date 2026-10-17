@@ -1,0 +1,30 @@
+# dependencies / build
+node_modules/
+lib/
+dist/
+build/
+*.tgz
+
+# env / secrets
+.env
+.env.*
+*.key
+*.pem
+.credentials*
+
+# logs / temp / local runs
+*.log
+tmp/
+temp/
+logs/
+
+# local memory (per-machine audit log, not distributed)
+memory/
+
+# local backups
+*.bak*
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/

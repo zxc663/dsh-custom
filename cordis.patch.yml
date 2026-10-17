@@ -1,0 +1,6 @@
+# dsh.bundle 安装层（`dsh plugin add` 使用）：插件行经「包名+子路径」解析到预编译产物 lib/。
+# 运行时零宿主硬依赖（无 peer 声明——宿主 0.2.x 对 peer 做 fail-closed 检查，无声明即无拒装面）。
+# 开发态挂载示例（file:// 直载 .ts）见 cordis.yml——两者行为一致，lib/ 由 src/ 转译而来。
+- insert:
+    - id: dsh-custom
+      name: 'dsh-custom/lib/index.js'

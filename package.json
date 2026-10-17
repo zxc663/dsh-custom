@@ -1,0 +1,30 @@
+{
+  "name": "dsh-custom",
+  "version": "0.1.0",
+  "description": "「DSH自定义」系统提示词管理插件：查看实际装配的官方系统提示词、深度自定义修改、纪律文本 system 层前置（P0：存储骨架＋只读装配视图＋防静默改写护栏）",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "files": [
+    "lib",
+    "cordis.patch.yml",
+    "LICENSE",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "scripts": {
+    "prepack": "npm run build",
+    "build": "tsc -p tsconfig.build.json",
+    "test": "node scripts/run-tests.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.5",
+    "typescript": "5.7"
+  }
+}
