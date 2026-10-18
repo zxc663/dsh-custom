@@ -1,5 +1,5 @@
 // 会话级覆盖 + 统计聚合 单测：验证「会话级 > 全局」数据面与 stats 聚合真实生效。
-import { writeSessionOverride, readSessionOverride, rollbackSession, sessionDir, makeApi } from '../src/index.ts'
+import { writeSessionOverride, readSessionOverride, rollbackSession, sessionDir, makeApi, uniqueBackupName } from '../src/index.ts'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -63,6 +63,11 @@ try {
 } finally {
   rmSync(root, { recursive: true, force: true })
 }
+
+// 快照同毫秒撞名防护（2026-10-19 CI 修复）：Linux 快机同毫秒连续快照曾互相覆盖 →「暂无上一版」
+t('bakname: 无冲突=原样', uniqueBackupName('S', () => false) === 'S')
+t('bakname: 冲突→追加-1', uniqueBackupName('S', (n) => n === 'S') === 'S-1')
+t('bakname: 连撞→递增', uniqueBackupName('S', (n) => n === 'S' || n === 'S-1') === 'S-2')
 
 console.log(`\n${pass} pass, ${fail} fail`)
 process.exit(fail > 0 ? 1 : 0)

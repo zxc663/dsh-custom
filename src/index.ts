@@ -236,8 +236,19 @@ export function detectExternalChanges(root: string): ExternalChange[] {
   return changes
 }
 
+/** 备份目录唯一名（2026-10-19 CI 修复）：毫秒级时间戳在快机/CI 上可同毫秒撞名——追加序号保唯一（同毫秒连续快照不再互相覆盖）。 */
+export function uniqueBackupName(base: string, exists: (name: string) => boolean): string {
+  if (!exists(base)) return base
+  for (let i = 1; i <= 999; i++) {
+    const cand = `${base}-${i}`
+    if (!exists(cand)) return cand
+  }
+  return `${base}-${Math.random().toString(36).slice(2, 8)}`
+}
+
 export function snapshot(root: string, reason: string): string {
-  const stamp = new Date().toISOString().replace(/[:.]/g, '-').replace(/Z$/, '')
+  const base = new Date().toISOString().replace(/[:.]/g, '-').replace(/Z$/, '')
+  const stamp = uniqueBackupName(base, (n) => existsSync(join(root, 'backups', n)))
   const dir = join(root, 'backups', stamp)
   mkdirSync(dir, { recursive: true })
   const copied: string[] = []
@@ -1233,7 +1244,8 @@ function snapshotSession(root: string, id: string): string | null {
   if (!existsSync(dir)) return null
   const files = SESSION_SEGMENTS.filter((seg) => existsSync(join(dir, seg + '.md')))
   if (files.length === 0) return null
-  const stamp = new Date().toISOString().replace(/[:.]/g, '-')
+  const base = new Date().toISOString().replace(/[:.]/g, '-')
+  const stamp = uniqueBackupName(base, (n) => existsSync(join(dir, 'backups', n)))
   const dest = join(dir, 'backups', stamp)
   mkdirSync(dest, { recursive: true })
   for (const seg of files) {
