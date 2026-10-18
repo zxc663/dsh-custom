@@ -439,7 +439,7 @@ console.log('M. HTTP 数据面（P1 端点：discipline/settings/agents）')
     const gas = await callApi(api3, 'GET', '/api/dsh-custom/assembly?session=sess-1')
     check(
       'assembly?session 200 且以 scope=agent 求装配',
-      gas.code === 200 && String(gas.json.value.scopeLabel).includes('作用域实取') && receivedContext !== null && receivedContext.agent === fakeAgent && receivedContext.scope === fakeAgent,
+      gas.code === 200 && String(gas.json.value.scopeLabel).startsWith('会话 ') && !String(gas.json.value.scopeLabel).includes('作用域实取') && receivedContext !== null && receivedContext.agent === fakeAgent && receivedContext.scope === fakeAgent,
     )
     const gasBad = await callApi(api3, 'GET', '/api/dsh-custom/assembly?session=nope')
     check('assembly 未知会话 → 404', gasBad.code === 404)

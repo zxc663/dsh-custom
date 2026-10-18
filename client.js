@@ -261,7 +261,7 @@ window.__ModuleLoader__.load({
             detail ? h('div', null,
               h('div', { className: 'dshc_dh' },
                 h('div', { className: 't' }, (detail.scopeLabel || '会话') ),
-                h('div', { className: 'm' }, '生成于 ' + fmtTime(detail.generatedAt) + ' ｜ 渲染器' + (detail.rendererAvailable ? '在线' : '不可用（已降级原文）'))),
+                h('div', { className: 'm' }, '模型 ' + ((sessions.find((x) => x.id === detail.scope?.id || x.id === (detail.scope && detail.scope.session)) || {}).model || '未知') + ' · 生成于 ' + fmtTime(detail.generatedAt) + ' · 渲染器' + (detail.rendererAvailable ? '在线' : '不可用（已降级原文）'))),
               h('div', { className: 'dshc_segs' },
                 segDefs.map(([k, label]) => h('button', { key: k, 'data-active': seg === k, onClick: () => { setSeg(k); setEditing(false); } }, label)),
                 h('span', { className: 'dshc_spacer' }),
@@ -291,7 +291,7 @@ window.__ModuleLoader__.load({
     // ── ② 系统提示词管理 ──
     function PromptsPage(props) {
       const [seg, setSeg] = useState('discipline');
-      const [data, setData] = useState({ discipline: null, user: null, layered: null, override: null });
+      const [data, setData] = useState({ discipline: null, user: null, layered: null, override: null, asm: null });
       const [draft, setDraft] = useState('');
       const [msg, setMsg] = useState(null);
       const [err, setErr] = useState(null);
@@ -299,12 +299,19 @@ window.__ModuleLoader__.load({
 
       const load = useCallback(async () => {
         try {
-          const [d, u, l, o] = await Promise.all([api('discipline'), api('user-prompt'), api('layered'), api('override')]);
-          setData({ discipline: d, user: u, layered: l, override: o });
+          const [d, u, l, o, a] = await Promise.all([api('discipline'), api('user-prompt'), api('layered'), api('override'), api('assembly')]);
+          setData({ discipline: d, user: u, layered: l, override: o, asm: a });
           setDraft((seg === 'discipline' ? d.sourceText : seg === 'user' ? u.text : seg === 'layered' ? '' : o.text) || '');
         } catch (e) { setErr('读取失败：' + String((e && e.message) || e)); }
       }, [seg]);
       useEffect(() => { void load(); }, [load]);
+
+      // 实际生效内容（来自真实装配，只读）：运行时插件的纪律段＋宿主官方面
+      const asmSections = (data.asm && data.asm.sections) || [];
+      const effDiscipline = asmSections.find((s) => s.name === 'shisanxinuo:core-discipline');
+      const officialSecs = asmSections.filter((s) => s.origin === 'official');
+      const officialText = officialSecs.map((s) => s.text).join('\n\n');
+      const officialNames = officialSecs.map((s) => s.name).join('、');
 
       const segDefs = [['discipline', '常驻核心'], ['user', '我的提示词'], ['layered', '渐进加载层'], ['system', '系统原版'], ['override', '⚠ 接管官方']];
       const save = async () => {
@@ -349,8 +356,10 @@ window.__ModuleLoader__.load({
                   }) }, data.override && data.override.enabled ? '已启用（点击停用）' : '启用接管')))
               : seg === 'system'
                 ? h('div', null,
-                  h('div', { className: 'dshc_hint', style: { marginBottom: 8 } }, '系统原版（宿主官方提示词，可修改；保存=接管官方 complete，需确认并自动快照）'),
-                  h('textarea', { className: 'dshc_ta', value: draft, onChange: (e) => setDraft(e.target.value) }),
+                  h('div', { className: 'dshc_hint', style: { marginBottom: 6 } }, '① 宿主官方提示词原文（来自实际装配，只读' + (officialSecs.length ? '；' + officialSecs.length + ' 段：' + officialNames : '；装配暂无官方面') + '）'),
+                  h('textarea', { className: 'dshc_ta', readOnly: true, value: officialText || '（装配暂无官方面内容）', style: { minHeight: 120, marginBottom: 10 } }),
+                  h('div', { className: 'dshc_hint', style: { marginBottom: 6 } }, '② 接管草稿（保存＝用下面文本整段替换官方提示词；空＝未接管，上方原文继续生效）'),
+                  h('textarea', { className: 'dshc_ta', value: draft, onChange: (e) => setDraft(e.target.value), placeholder: '未接管——此处为空时官方原文生效；写内容保存即接管' }),
                   h('div', { className: 'dshc_row' }, h('button', { className: 'dshc_btn', 'data-primary': true, onClick: () => setModal({
                     title: '保存系统原版修改？',
                     body: h('div', null, h('p', null, '⚠ 修改系统原版=接管官方（complete 整段替换）。'), h('p', null, '保存前自动快照。')),
@@ -359,10 +368,22 @@ window.__ModuleLoader__.load({
                       h('button', { className: 'dshc_btn', onClick: () => setModal(null) }, '取消')),
                   }) }, '保存修改')))
                 : seg === 'layered'
-                  ? h('textarea', { className: 'dshc_ta', readOnly: true, value: '渐进加载层（只读）：' + JSON.stringify(data.layered && data.layered.sections ? data.layered.sections.map((s) => s.name) : []) })
+                  ? h('div', null,
+                    h('div', { className: 'dshc_hint', style: { marginBottom: 6 } }, '按需加载的流程细则：平时不占提示词，任务触发对应场景时才临时注入、用完即走（省上下文）。以下为只读清单：'),
+                    (data.layered && data.layered.sections ? data.layered.sections : []).map((s) => h('div', { key: s.name, className: 'dshc_trow' },
+                      h('div', { className: 'dshc_tlabel' }, s.name.replace(/\.md$/, ''),
+                        s.modified ? h('span', { className: 'dshc_tag' }, '已改') : null,
+                        s.enabled === false ? h('span', { className: 'dshc_er' }, ' 已停用') : null),
+                      h('span', { className: 'dshc_hint' }, s.modified ? '用户已改' : '出厂原文'))),
+                    (data.layered && data.layered.sections && data.layered.sections.length === 0) ? h('div', { className: 'dshc_empty' }, '无分节') : null,
+                    h('div', { className: 'dshc_hint', style: { marginTop: 8 } }, '编辑功能未开放（需要时反馈加工）'))
                   : h('div', null,
-                    h('div', { className: 'dshc_hint', style: { marginBottom: 8 } }, seg === 'discipline' ? '常驻核心（工程纪律）' : '我的提示词（用户自定义段）'),
-                    h('textarea', { className: 'dshc_ta', value: draft, onChange: (e) => setDraft(e.target.value) })),
+                    seg === 'discipline' ? h('div', null,
+                      h('div', { className: 'dshc_hint', style: { marginBottom: 6 } }, '① 实际生效的常驻核心（来源=运行时治理插件，只读' + (effDiscipline ? '；' + String(effDiscipline.text || '').length + ' 字' : '；装配暂未含该段') + '）——模型每回合看到的就是它：'),
+                      h('textarea', { className: 'dshc_ta', readOnly: true, value: (effDiscipline && effDiscipline.text) || '（装配暂未含运行时纪律段）', style: { minHeight: 140, marginBottom: 10 } }),
+                      h('div', { className: 'dshc_hint', style: { marginBottom: 6 } }, '② 自定义覆盖（默认空＝直接用上方运行时默认；写内容保存后改为注入你写的版本）'))
+                      : h('div', { className: 'dshc_hint', style: { marginBottom: 6 } }, '我的提示词（用户自定义段；空＝不注入）'),
+                    h('textarea', { className: 'dshc_ta', value: draft, onChange: (e) => setDraft(e.target.value), placeholder: seg === 'discipline' ? '空＝使用运行时默认纪律' : '空＝不注入该段' })),
             err ? h('div', { className: 'dshc_err' }, h('span', null, err)) : null,
             msg ? h('div', { className: 'dshc_hint', style: { marginTop: 8 } }, msg.title + '：' + (msg.detail || '')) : null)));
     }
@@ -381,24 +402,45 @@ window.__ModuleLoader__.load({
         try { await api('backups/restore', { method: 'PUT', body: { name } }); await load(); setMsg({ title: '已回滚', detail: '已回滚到 ' + name + '（回滚前已再快照）' }); }
         catch (e) { setMsg({ title: '回滚失败', detail: String((e && e.message) || e) }); }
       };
+      const showDetail = async (name) => {
+        try {
+          const v = await api('backups/detail?name=' + encodeURIComponent(name));
+          setModal({
+            title: '快照详情 · ' + name,
+            body: h('div', null,
+              h('p', null, '这份快照里保存了以下文件（回滚＝把这些文件恢复为此刻的内容）：'),
+              h('ul', null, (v.files || []).map((f) => h('li', { key: f.file, style: { fontSize: 12, margin: '4px 0' } },
+                h('b', null, f.file), ' —— ' + f.lines + ' 行 / ' + f.bytes + ' 字节',
+                f.head ? h('div', { style: { color: 'var(--dsw-alias-label-secondary)', marginTop: 2 } }, '开头：' + f.head) : null))),
+              v.settings ? h('p', null, '当时的开关状态：' + Object.entries(v.settings).filter(([k]) => k !== 'version').map(([k, val]) => k + '=' + JSON.stringify(val)).join('，')) : null,
+              h('p', null, '提示：快照是「改提示词前」的自动备份——不确定回哪个时，先看详情里各文件内容再决定。')),
+            actions: h('div', { className: 'dshc_row' },
+              h('button', { className: 'dshc_btn', 'data-danger': true, onClick: () => void restore(name) }, '回滚到此版本'),
+              h('button', { className: 'dshc_btn', onClick: () => setModal(null) }, '关闭')),
+          });
+        } catch (e) { setMsg({ title: '详情读取失败', detail: String((e && e.message) || e) }); }
+      };
       return h('div', null,
         h(Modal, { open: modal !== null, title: modal ? modal.title : '', onClose: () => setModal(null), actions: modal ? modal.actions : null }, modal ? modal.body : null),
         h('div', { className: 'dshc_panel' },
           h('div', { className: 'dshc_ph' }, h('h3', null, '快照与恢复'), h('span', { className: 'dshc_spacer' }),
-            h('button', { className: 'dshc_btn', onClick: () => void load() }, '刷新')),
+            h('span', { className: 'dshc_hint' }, '每次改提示词前的自动备份；不确定回哪个就先看详情')),
           h('ul', { className: 'dshc_audit' },
             entries === null ? h('li', { className: 'dshc_empty' }, '读取中…')
               : entries.length === 0 ? h('li', { className: 'dshc_empty' }, '暂无快照')
               : entries.map((b) => h('li', { key: b.name },
                 h('span', null, b.name),
                 h('span', { className: 'dshc_hint' }, (b.files || []).join('、')),
-                h('span', null, h('button', { className: 'dshc_btn', onClick: () => setModal({
-                  title: '回滚到 ' + b.name + '？',
-                  body: h('p', null, '回滚前会自动再快照当前状态，可反悔。'),
-                  actions: h('div', { className: 'dshc_row' },
-                    h('button', { className: 'dshc_btn', 'data-danger': true, onClick: () => void restore(b.name) }, '确认回滚'),
-                    h('button', { className: 'dshc_btn', onClick: () => setModal(null) }, '取消')),
-                }) }, '回滚到此版本')))),
+                h('span', null,
+                  h('button', { className: 'dshc_btn', onClick: () => void showDetail(b.name) }, '详情'),
+                  ' ',
+                  h('button', { className: 'dshc_btn', onClick: () => setModal({
+                    title: '回滚到 ' + b.name + '？',
+                    body: h('p', null, '回滚前会自动再快照当前状态，可反悔。'),
+                    actions: h('div', { className: 'dshc_row' },
+                      h('button', { className: 'dshc_btn', 'data-danger': true, onClick: () => void restore(b.name) }, '确认回滚'),
+                      h('button', { className: 'dshc_btn', onClick: () => setModal(null) }, '取消')),
+                  }) }, '回滚到此版本')))),
             msg ? h('li', { className: 'dshc_hint' }, msg.title + '：' + (msg.detail || '')) : null)));
     }
 
@@ -423,15 +465,30 @@ window.__ModuleLoader__.load({
           h('div', { className: 'dshc_card' }, h('div', { className: 'k' }, '活跃会话'), h('div', { className: 'v' }, String(s.sessions)), h('div', { className: 's' }, '个在装配作用域内')),
           h('div', { className: 'dshc_card' }, h('div', { className: 'k' }, '会话外改动'), h('div', { className: 'v' }, String(s.externalChange || 0)), h('div', { className: 's' }, '次检测到'))),
         h('div', { className: 'dshc_panel' },
-          h('div', { className: 'dshc_ph' }, h('h3', null, '审计时间线')),
+          h('div', { className: 'dshc_ph' }, h('h3', null, '动作流水'), h('span', { className: 'dshc_spacer' }),
+            h('span', { className: 'dshc_hint' }, '插件的每一步动作都有留痕：改了什么、什么生效了、拦了谁')),
           h('ul', { className: 'dshc_audit' },
             (s.audit || []).slice().reverse().map((a, i) => h('li', { key: i },
               h('span', null, fmtTime(a.ts)),
-              h('span', null, String(a.kind || '?')),
-              h('span', { className: String(a.kind) === 'guard-deny' ? 'dshc_er' : String(a.kind) === 'external-change' ? 'dshc_wa' : 'dshc_ok' }, String(a.kind || '?')))),
-            (s.audit || []).length === 0 ? h('li', { className: 'dshc_empty' }, '暂无审计记录') : null)),
+              h('span', null, AUDIT_LABELS[String(a.kind)] || String(a.kind || '?')),
+              h('span', { className: String(a.kind) === 'guard-deny' ? 'dshc_er' : String(a.kind) === 'external-change' ? 'dshc_wa' : 'dshc_ok' }, AUDIT_LABELS[String(a.kind)] ? '已留痕' : String(a.kind || '?')))),
+            (s.audit || []).length === 0 ? h('li', { className: 'dshc_empty' }, '暂无记录') : null)),
         err ? h('div', { className: 'dshc_err' }, h('span', null, err)) : null);
     }
+
+    // 动作流水人话对照（kind → 用户语言）；未登记的 kind 原样显示（不隐瞒）
+    const AUDIT_LABELS = {
+      boot: '插件启动', rules: '规则包装载', discipline: '纪律文本装载',
+      'sysprompt-attached': '提示词段已挂载', 'api-mounted': '管理后台数据面就绪',
+      'renderer-resolve': '渲染器解析', 'render-tolerate': '容错渲染（变量未解析）',
+      'session-override-saved': '会话覆盖已保存', 'session-system-applied': '会话系统段已生效',
+      'session-system-cleared': '会话系统段已清除', 'session-rollback': '会话已回滚',
+      'guard-deny': '护栏拦截了一次写入', 'external-change': '检测到配置被外部改动',
+      'settings-saved': '设置已保存', 'discipline-saved': '常驻核心已保存',
+      'governance-changed': '治理开关已变更', 'governance-allowlist': '白名单已变更',
+      'governance': '治理开关装载', 'compaction-signal': '压缩重载信号已送达',
+      'layered-inject': '按需注入流程分节',
+    };
 
     // ── ⑤ 治理开关（P46；UI 迭代：switch 心智＋busy 防连点＋错误态不再被早退吞掉）──
     function Switch(props) {
@@ -566,13 +623,26 @@ window.__ModuleLoader__.load({
 
     const inject = ['slots'];
 
+    // 页面错误边界：单页崩溃不再拖白整个管理后台（错误文本原样显示，便于反馈定位）
+    class TabBoundary extends React.Component {
+      constructor(props) { super(props); this.state = { err: null }; }
+      static getDerivedStateFromError(e) { return { err: e }; }
+      render() {
+        if (!this.state.err) return this.props.children;
+        return h('div', { className: 'dshc_panel' },
+          h('div', { className: 'dshc_ph' }, h('h3', null, '页面出错了')),
+          h('div', { className: 'dshc_banner' }, '渲染异常：' + String((this.state.err && this.state.err.message) || this.state.err || '未知错误')),
+          h('div', { className: 'dshc_hint', style: { padding: '0 14px 14px' } }, '请把上面这段错误文字反馈给维护者；切换其他页签或点「刷新」可尝试恢复。'));
+      }
+    }
+
     function apply(ctx) {
       ctx.slots.inject('settings.section', () => ctx.slots.register({
         name: 'settings.section',
         id: 'dsh-custom',
         order: 30,
         label: () => 'DSH自定义',
-      }, Tab));
+      }, () => h(TabBoundary, null, h(Tab))));
     }
 
     exports.apply = apply;

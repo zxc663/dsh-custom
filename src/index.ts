@@ -844,6 +844,24 @@ export function listBackups(root: string): BackupEntry[] {
     .slice(0, 100)
 }
 
+/** 快照详情（P47 UX 批）：每个文件的字节/行数/前 120 字摘要＋settings 键值——让「回滚到哪个状态」可读。 */
+export interface BackupFileDetail { file: string; bytes: number; lines: number; head: string }
+export function backupDetail(root: string, name: string): { name: string; files: BackupFileDetail[]; settings: Record<string, unknown> | null } | null {
+  if (!/^[0-9A-Za-z._-]+$/.test(name)) return null
+  const dir = join(root, 'backups', name)
+  if (!existsSync(dir)) return null
+  const files: BackupFileDetail[] = []
+  let settings: Record<string, unknown> | null = null
+  for (const f of readdirSync(dir)) {
+    const p = join(dir, f)
+    let text = ''
+    try { text = readFileSync(p, 'utf8') } catch { continue }
+    files.push({ file: f, bytes: Buffer.byteLength(text, 'utf8'), lines: text.split('\n').filter((x) => x.trim() !== '').length, head: text.replace(/\s+/g, ' ').slice(0, 120) })
+    if (f === 'settings.json') { try { settings = JSON.parse(text) as Record<string, unknown> } catch { /* 坏档不解析 */ } }
+  }
+  return { name, files, settings }
+}
+
 /** 恢复快照（限 backups 根内；恢复前先对当前状态拍快照，保证可逆）。 */
 export function restoreBackup(root: string, name: string): { restored: string[]; preRestoreSnapshot: string } {
   const b = resolve(join(root, 'backups'))
@@ -1530,7 +1548,7 @@ export function makeApi(
           return
         }
         const scoped = { assemble: () => svc.assemble({ agent: found.agent, scope: found.agent }) }
-        const label = `会话 ${sessionId.replace(/^session-/, '').slice(0, 8)}${found.cwd !== null ? `｜${found.cwd}` : ''}（作用域实取）`
+        const label = `会话 ${sessionId.replace(/^session-/, '').slice(0, 8)}${found.title ? ` · ${found.title}` : ''}`
         readAssembly(scoped, loader, root, label)
           .then((value) => jsonResponse(res, 200, { ok: true, value }))
           .catch((e: unknown) => jsonResponse(res, 500, { ok: false, error: String((e as { message?: unknown })?.message ?? e) }))
@@ -1769,6 +1787,20 @@ export function makeApi(
         return
       }
       jsonResponse(res, 405, { ok: false, error: 'method not allowed' })
+      return
+    }
+    if (pathname === '/api/dsh-custom/backups/detail') {
+      if (method !== 'GET') {
+        jsonResponse(res, 405, { ok: false, error: 'method not allowed' })
+        return
+      }
+      const q = new URLSearchParams(String(req?.url ?? '').split('?')[1] ?? '')
+      const detail = backupDetail(root, q.get('name') ?? '')
+      if (!detail) {
+        jsonResponse(res, 404, { ok: false, error: '快照不存在或名称非法' })
+        return
+      }
+      jsonResponse(res, 200, { ok: true, value: detail })
       return
     }
     if (pathname === '/api/dsh-custom/settings') {
