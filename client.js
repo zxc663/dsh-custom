@@ -369,14 +369,20 @@ window.__ModuleLoader__.load({
                   }) }, '保存修改')))
                 : seg === 'layered'
                   ? h('div', null,
-                    h('div', { className: 'dshc_hint', style: { marginBottom: 6 } }, '按需加载的流程细则：平时不占提示词，任务触发对应场景时才临时注入、用完即走（省上下文）。以下为只读清单：'),
+                    h('div', { className: 'dshc_hint', style: { marginBottom: 6 } }, '按需加载的流程细则：平时不占提示词，任务触发对应场景时才临时注入、用完即走（省上下文）。可对每个分节：临时停用（模型收不到该场景细则）或恢复出厂原文。'),
                     (data.layered && data.layered.sections ? data.layered.sections : []).map((s) => h('div', { key: s.name, className: 'dshc_trow' },
                       h('div', { className: 'dshc_tlabel' }, s.name.replace(/\.md$/, ''),
                         s.modified ? h('span', { className: 'dshc_tag' }, '已改') : null,
                         s.enabled === false ? h('span', { className: 'dshc_er' }, ' 已停用') : null),
-                      h('span', { className: 'dshc_hint' }, s.modified ? '用户已改' : '出厂原文'))),
+                      h('span', { className: 'dshc_row' },
+                        s.modified ? h('button', { className: 'dshc_btn', onClick: async () => {
+                          try { await api('layered/' + encodeURIComponent(s.name) + '/reset', { method: 'POST' }); await load(); setMsg({ title: '已恢复出厂原文', detail: s.name }); } catch (e) { setMsg({ title: '恢复失败', detail: String((e && e.message) || e) }); }
+                        } }, '恢复出厂') : null,
+                        h('button', { className: 'dshc_btn', onClick: async () => {
+                          try { await api('layered/' + encodeURIComponent(s.name) + '/toggle', { method: 'POST', body: { enabled: s.enabled === false } }); await load(); setMsg({ title: s.enabled === false ? '已启用' : '已停用', detail: s.name + (s.enabled === false ? ' 将重新按场景注入' : ' 停用后模型收不到该场景细则') }); } catch (e) { setMsg({ title: '操作失败', detail: String((e && e.message) || e) }); }
+                        } }, s.enabled === false ? '启用' : '停用')))),
                     (data.layered && data.layered.sections && data.layered.sections.length === 0) ? h('div', { className: 'dshc_empty' }, '无分节') : null,
-                    h('div', { className: 'dshc_hint', style: { marginTop: 8 } }, '编辑功能未开放（需要时反馈加工）'))
+                    h('div', { className: 'dshc_hint', style: { marginTop: 8 } }, '停用说明：停用后该场景不再注入细则（模型侧无感知，不会报错）；「添加自定义分节」需要注入安全白名单机制，规划中。'))
                   : h('div', null,
                     seg === 'discipline' ? h('div', null,
                       h('div', { className: 'dshc_hint', style: { marginBottom: 6 } }, '① 实际生效的常驻核心（来源=运行时治理插件，只读' + (effDiscipline ? '；' + String(effDiscipline.text || '').length + ' 字' : '；装配暂未含该段') + '）——模型每回合看到的就是它：'),
@@ -420,6 +426,10 @@ window.__ModuleLoader__.load({
           });
         } catch (e) { setMsg({ title: '详情读取失败', detail: String((e && e.message) || e) }); }
       };
+      const fmtSnapDate = (name) => {
+        const m = String(name).match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2})-(\d{2})/);
+        return m ? `${m[2]}月${m[3]}日 ${m[4]}:${m[5]}` : name;
+      };
       return h('div', null,
         h(Modal, { open: modal !== null, title: modal ? modal.title : '', onClose: () => setModal(null), actions: modal ? modal.actions : null }, modal ? modal.body : null),
         h('div', { className: 'dshc_panel' },
@@ -427,20 +437,21 @@ window.__ModuleLoader__.load({
             h('span', { className: 'dshc_hint' }, '每次改提示词前的自动备份；不确定回哪个就先看详情')),
           h('ul', { className: 'dshc_audit' },
             entries === null ? h('li', { className: 'dshc_empty' }, '读取中…')
-              : entries.length === 0 ? h('li', { className: 'dshc_empty' }, '暂无快照')
-              : entries.map((b) => h('li', { key: b.name },
-                h('span', null, b.name),
-                h('span', { className: 'dshc_hint' }, (b.files || []).join('、')),
+              : entries.length === 0 ? h('li', { className: 'dshc_empty' }, '暂无快照——第一次在上方修改提示词时会自动生成')
+              : entries.map((b) => h('li', { key: b.name, style: { display: 'flex', alignItems: 'center', gap: 12, padding: '12px 0', borderBottom: '1px solid var(--dsw-alias-border-l2)' } },
+                h('div', { style: { flex: 1 } },
+                  h('div', { style: { fontWeight: 600, fontSize: 13 } }, '提示词备份 · ' + fmtSnapDate(b.name)),
+                  h('div', { className: 'dshc_hint', style: { marginTop: 3 } }, '包含 ' + (b.files || []).length + ' 个文件（纪律核心、开关状态等）')),
                 h('span', null,
                   h('button', { className: 'dshc_btn', onClick: () => void showDetail(b.name) }, '详情'),
                   ' ',
                   h('button', { className: 'dshc_btn', onClick: () => setModal({
-                    title: '回滚到 ' + b.name + '？',
-                    body: h('p', null, '回滚前会自动再快照当前状态，可反悔。'),
+                    title: '回滚到 ' + fmtSnapDate(b.name) + '？',
+                    body: h('div', null, h('p', null, '把纪律核心、开关状态等恢复到 ' + fmtSnapDate(b.name) + ' 那一刻的样子。'), h('p', null, '回滚前会自动再快照当前状态，可反悔。')),
                     actions: h('div', { className: 'dshc_row' },
                       h('button', { className: 'dshc_btn', 'data-danger': true, onClick: () => void restore(b.name) }, '确认回滚'),
                       h('button', { className: 'dshc_btn', onClick: () => setModal(null) }, '取消')),
-                  }) }, '回滚到此版本')))),
+                  }) }, '回滚')))),
             msg ? h('li', { className: 'dshc_hint' }, msg.title + '：' + (msg.detail || '')) : null)));
     }
 
@@ -449,30 +460,46 @@ window.__ModuleLoader__.load({
       const [stats, setStats] = useState(null);
       const [err, setErr] = useState(null);
       const [range, setRange] = useState('all');
+      const [showAll, setShowAll] = useState(false);
       const load = useCallback(async () => {
         try { setStats(await api('stats')); } catch (e) { setErr('统计读取失败：' + String((e && e.message) || e)); }
       }, []);
       useEffect(() => { void load(); }, [load]);
       const s = stats || { guardDeny: 0, snapshots: 0, sessions: 0, audit: [] };
+      // 时间范围真实过滤（today/week 按本地零点/7 天计）
+      const now = Date.now();
+      const minTs = range === 'today' ? new Date(new Date().toLocaleDateString()).getTime() : range === 'week' ? now - 7 * 86400000 : 0;
+      const rows = (s.audit || [])
+        .filter((a) => { const meta = AUDIT_META[String(a.kind)]; if (meta && meta.internal) return false; return true; })
+        .filter((a) => { const t = Date.parse(a.ts); return isNaN(t) ? true : t >= minTs; })
+        .slice().reverse();
+      const visible = showAll ? rows : rows.slice(0, 8);
       return h('div', null,
         h('div', { className: 'dshc_panel', style: { marginBottom: 14 } },
           h('div', { className: 'dshc_ph' }, h('h3', null, '统计数据'), h('span', { className: 'dshc_spacer' }),
-            h('select', { className: 'dshc_btn', value: range, onChange: (e) => setRange(e.target.value) },
-              h('option', { value: 'all' }, '全部'), h('option', { value: 'week' }, '本周'), h('option', { value: 'today' }, '今天')))),
+            h('span', { className: 'dshc_hint' }, '时间范围'),
+            h('select', { className: 'dshc_select', value: range, onChange: (e) => setRange(e.target.value) },
+              h('option', { value: 'all' }, '全部'), h('option', { value: 'week' }, '最近 7 天'), h('option', { value: 'today' }, '今天')))),
         h('div', { className: 'dshc_cards' },
-          h('div', { className: 'dshc_card' }, h('div', { className: 'k' }, '护栏拦截'), h('div', { className: 'v' }, String(s.guardDeny)), h('div', { className: 's' }, '次静默改写被拦')),
-          h('div', { className: 'dshc_card' }, h('div', { className: 'k' }, '快照'), h('div', { className: 'v' }, String(s.snapshots)), h('div', { className: 's' }, '个可回滚版本')),
-          h('div', { className: 'dshc_card' }, h('div', { className: 'k' }, '活跃会话'), h('div', { className: 'v' }, String(s.sessions)), h('div', { className: 's' }, '个在装配作用域内')),
-          h('div', { className: 'dshc_card' }, h('div', { className: 'k' }, '会话外改动'), h('div', { className: 'v' }, String(s.externalChange || 0)), h('div', { className: 's' }, '次检测到'))),
+          h('div', { className: 'dshc_card' }, h('div', { className: 'k' }, '护栏拦截'), h('div', { className: 'v' }, String(s.guardDeny)), h('div', { className: 's' }, '次绕过页面改提示词被挡')),
+          h('div', { className: 'dshc_card' }, h('div', { className: 'k' }, '快照'), h('div', { className: 'v' }, String(s.snapshots)), h('div', { className: 's' }, '个可回滚的提示词备份')),
+          h('div', { className: 'dshc_card' }, h('div', { className: 'k' }, '活跃会话'), h('div', { className: 'v' }, String(s.sessions)), h('div', { className: 's' }, '个可被定制提示词的会话')),
+          h('div', { className: 'dshc_card' }, h('div', { className: 'k' }, '页面外改动'), h('div', { className: 'v' }, String(s.externalChange || 0)), h('div', { className: 's' }, '次检测到（改前有快照可回滚）'))),
         h('div', { className: 'dshc_panel' },
           h('div', { className: 'dshc_ph' }, h('h3', null, '动作流水'), h('span', { className: 'dshc_spacer' }),
-            h('span', { className: 'dshc_hint' }, '插件的每一步动作都有留痕：改了什么、什么生效了、拦了谁')),
+            h('span', { className: 'dshc_hint' }, rows.length + ' 条记录' + (rows.length > 8 && !showAll ? '，仅显示最近 8 条' : ''))),
           h('ul', { className: 'dshc_audit' },
-            (s.audit || []).slice().reverse().map((a, i) => h('li', { key: i },
-              h('span', null, fmtTime(a.ts)),
-              h('span', null, AUDIT_LABELS[String(a.kind)] || String(a.kind || '?')),
-              h('span', { className: String(a.kind) === 'guard-deny' ? 'dshc_er' : String(a.kind) === 'external-change' ? 'dshc_wa' : 'dshc_ok' }, AUDIT_LABELS[String(a.kind)] ? '已留痕' : String(a.kind || '?')))),
-            (s.audit || []).length === 0 ? h('li', { className: 'dshc_empty' }, '暂无记录') : null)),
+            visible.map((a, i) => {
+              const meta = AUDIT_META[String(a.kind)] || {};
+              return h('li', { key: i, style: { gridTemplateColumns: '110px 1fr', rowGap: 2 } },
+                h('span', null, fmtTime(a.ts)),
+                h('span', null,
+                  h('div', null, meta.l || String(a.kind || '?')),
+                  meta.e ? h('div', { className: 'dshc_hint' }, meta.e) : null));
+            }),
+            rows.length === 0 ? h('li', { className: 'dshc_empty' }, '该时间范围内暂无动作') : null,
+            rows.length > 8 ? h('li', { className: 'dshc_empty' },
+              h('button', { className: 'dshc_btn', onClick: () => setShowAll(!showAll) }, showAll ? '收起，只看最近 8 条' : '展开全部 ' + rows.length + ' 条')) : null)),
         err ? h('div', { className: 'dshc_err' }, h('span', null, err)) : null);
     }
 
@@ -488,6 +515,27 @@ window.__ModuleLoader__.load({
       'governance-changed': '治理开关已变更', 'governance-allowlist': '白名单已变更',
       'governance': '治理开关装载', 'compaction-signal': '压缩重载信号已送达',
       'layered-inject': '按需注入流程分节',
+    };
+
+    // 动作流水语义表：kind → { l: 一句话动作, e: 对你的影响 }；internal=true 的纯内部事件不上 UI
+    const AUDIT_META = {
+      boot: { l: '插件启动', e: '治理功能就绪' },
+      'sysprompt-attached': { l: '纪律提示词已注入', e: '每个会话自动带上纪律提示词' },
+      'api-mounted': { l: '管理后台就绪', e: '本页面的数据通道已可用' },
+      'session-override-saved': { l: '会话覆盖已保存', e: '你为单个会话写的提示词已生效' },
+      'session-system-applied': { l: '会话定制已生效', e: '该会话正在使用你设置的提示词' },
+      'session-system-cleared': { l: '会话定制已清除', e: '该会话恢复为跟随全局' },
+      'session-rollback': { l: '会话已回滚', e: '恢复到之前的版本' },
+      'guard-deny': { l: '拦截了一次绕过写入', e: '有程序试图绕过页面改提示词，被挡下' },
+      'external-change': { l: '检测到页面外改动', e: '提示词文件在管理页之外被修改过，请核对' },
+      'settings-saved': { l: '设置已保存', e: '注入等开关已更新' },
+      'governance-changed': { l: '治理开关已变更', e: '拦截等能力按你的设置调整' },
+      'governance-allowlist': { l: '白名单已变更', e: '命中该形态的命令不再弹审批卡' },
+      governance: { l: '治理开关已装载', e: '按你上次保存的开关状态启动' },
+      'layered-inject': { l: '按需注入了流程分节', e: '任务触发对应场景，临时注入细则' },
+      'renderer-resolve': { l: null, internal: true },
+      'render-tolerate': { l: null, internal: true },
+      'compaction-signal': { l: null, internal: true },
     };
 
     // ── ⑤ 治理开关（P46；UI 迭代：switch 心智＋busy 防连点＋错误态不再被早退吞掉）──
