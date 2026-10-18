@@ -290,6 +290,7 @@ window.__ModuleLoader__.load({
 
     // ── ② 系统提示词管理 ──
     function PromptsPage(props) {
+      const factorySet = new Set(['00-加载清单.md', 'clarify-protocol.md', 'compression-reload.md', 'docking-truth-list.md', 'environment-inventory.md', 'goal-mode.md', 'l2f-full-workflow.md', 'l2s-short-workflow.md', 'requirements-challenge.md']); // 与出厂 content/layered 清单同步
       const [seg, setSeg] = useState('discipline');
       const [data, setData] = useState({ discipline: null, user: null, layered: null, override: null, asm: null });
       const [draft, setDraft] = useState('');
@@ -369,20 +370,60 @@ window.__ModuleLoader__.load({
                   }) }, '保存修改')))
                 : seg === 'layered'
                   ? h('div', null,
-                    h('div', { className: 'dshc_hint', style: { marginBottom: 6 } }, '按需加载的流程细则：平时不占提示词，任务触发对应场景时才临时注入、用完即走（省上下文）。可对每个分节：临时停用（模型收不到该场景细则）或恢复出厂原文。'),
+                    h('div', { className: 'dshc_hint', style: { marginBottom: 6 } }, '按需加载的流程细则：平时不占提示词，任务触发对应场景时才临时注入、用完即走（省上下文）。可停用、恢复出厂、编辑内容，或新增自己的分节。'),
+                    h('div', { className: 'dshc_row', style: { marginBottom: 8 } },
+                      h('button', { className: 'dshc_btn', 'data-primary': true, onClick: () => setModal({
+                        title: '新增自定义分节',
+                        body: h('div', null,
+                          h('p', null, '分节名（英文/数字/连字符，自动补 .md；例如 my-workflow）：'),
+                          h('input', { className: 'dshc_input', value: newSec.name, onChange: (e) => setNewSec({ ...newSec, name: e.target.value }) }),
+                          h('p', null, '内容（该场景被触发时注入给模型的细则）：'),
+                          h('textarea', { className: 'dshc_ta', value: newSec.text, onChange: (e) => setNewSec({ ...newSec, text: e.target.value }) })),
+                        actions: h('div', { className: 'dshc_row' },
+                          h('button', { className: 'dshc_btn', 'data-primary': true, onClick: async () => {
+                            try { await api('layered/' + encodeURIComponent(newSec.name.trim().replace(/\.md$/, '') + '.md'), { method: 'PUT', body: { text: newSec.text } }); setModal(null); setNewSec({ name: '', text: '' }); await load(); setMsg({ title: '分节已新增', detail: '保存后按场景触发注入' }); } catch (e) { setMsg({ title: '新增失败', detail: String((e && e.message) || e) }); }
+                          } }, '创建'),
+                          h('button', { className: 'dshc_btn', onClick: () => setModal(null) }, '取消')),
+                      }) }, '＋ 新增分节')),
                     (data.layered && data.layered.sections ? data.layered.sections : []).map((s) => h('div', { key: s.name, className: 'dshc_trow' },
-                      h('div', { className: 'dshc_tlabel' }, s.name.replace(/\.md$/, ''),
-                        s.modified ? h('span', { className: 'dshc_tag' }, '已改') : null,
-                        s.enabled === false ? h('span', { className: 'dshc_er' }, ' 已停用') : null),
+                      h('div', { className: 'dshc_tlabel' },
+                        h('div', null,
+                          (SECTION_LABELS[s.name] || s.name.replace(/\.md$/, '')),
+                          s.name.startsWith('00-') ? h('span', { className: 'dshc_tag' }, '路由清单') : null,
+                          !factorySet.has(s.name) ? h('span', { className: 'dshc_tag' }, '自建') : null,
+                          s.modified && factorySet.has(s.name) ? h('span', { className: 'dshc_tag' }, '已改') : null,
+                          s.enabled === false ? h('span', { className: 'dshc_er' }, ' 已停用') : null),
+                        h('div', { className: 'dshc_hint' }, SECTION_LABELS[s.name] ? '' : '自定义分节（' + s.chars + ' 字）')),
                       h('span', { className: 'dshc_row' },
+                        h('button', { className: 'dshc_btn', onClick: async () => {
+                          try { const sec = await api('layered/' + encodeURIComponent(s.name)); setModal({
+                            title: '编辑分节 · ' + (SECTION_LABELS[s.name] || s.name),
+                            body: h('div', null,
+                              h('p', null, (s.name.startsWith('00-') ? '分节路由清单：' : '该场景被触发时注入给模型的内容：') + '（' + s.chars + ' 字）'),
+                              h('textarea', { className: 'dshc_ta', value: sec.text, onChange: (e) => { sec.text = e.target.value; } })),
+                            actions: h('div', { className: 'dshc_row' },
+                              h('button', { className: 'dshc_btn', 'data-primary': true, onClick: async () => {
+                                try { await api('layered/' + encodeURIComponent(s.name), { method: 'PUT', body: { text: sec.text } }); setModal(null); await load(); setMsg({ title: '分节已保存', detail: s.name }); } catch (e) { setMsg({ title: '保存失败', detail: String((e && e.message) || e) }); }
+                              } }, '保存'),
+                              h('button', { className: 'dshc_btn', onClick: () => setModal(null) }, '取消')),
+                          }); } catch (e) { setMsg({ title: '读取失败', detail: String((e && e.message) || e) }); }
+                        } }, '内容'),
                         s.modified ? h('button', { className: 'dshc_btn', onClick: async () => {
                           try { await api('layered/' + encodeURIComponent(s.name) + '/reset', { method: 'POST' }); await load(); setMsg({ title: '已恢复出厂原文', detail: s.name }); } catch (e) { setMsg({ title: '恢复失败', detail: String((e && e.message) || e) }); }
                         } }, '恢复出厂') : null,
                         h('button', { className: 'dshc_btn', onClick: async () => {
                           try { await api('layered/' + encodeURIComponent(s.name) + '/toggle', { method: 'POST', body: { enabled: s.enabled === false } }); await load(); setMsg({ title: s.enabled === false ? '已启用' : '已停用', detail: s.name + (s.enabled === false ? ' 将重新按场景注入' : ' 停用后模型收不到该场景细则') }); } catch (e) { setMsg({ title: '操作失败', detail: String((e && e.message) || e) }); }
-                        } }, s.enabled === false ? '启用' : '停用')))),
-                    (data.layered && data.layered.sections && data.layered.sections.length === 0) ? h('div', { className: 'dshc_empty' }, '无分节') : null,
-                    h('div', { className: 'dshc_hint', style: { marginTop: 8 } }, '停用说明：停用后该场景不再注入细则（模型侧无感知，不会报错）；「添加自定义分节」需要注入安全白名单机制，规划中。'))
+                        } }, s.enabled === false ? '启用' : '停用'),
+                        !factorySet.has(s.name) ? h('button', { className: 'dshc_btn', 'data-danger': true, onClick: () => setModal({
+                          title: '删除分节 · ' + s.name + '？',
+                          body: h('div', null, h('p', null, '删除后该自定义分节不再出现（模型侧无感知）。')), 
+                          actions: h('div', { className: 'dshc_row' },
+                            h('button', { className: 'dshc_btn', 'data-danger': true, onClick: async () => {
+                              try { await api('layered/' + encodeURIComponent(s.name), { method: 'DELETE' }); setModal(null); await load(); setMsg({ title: '分节已删除', detail: s.name }); } catch (e) { setMsg({ title: '删除失败', detail: String((e && e.message) || e) }); }
+                            } }, '确认删除'),
+                            h('button', { className: 'dshc_btn', onClick: () => setModal(null) }, '取消')),
+                        }) }, '删除') : null)),
+                    (data.layered && data.layered.sections && data.layered.sections.length === 0) ? h('div', { className: 'dshc_empty' }, '无分节') : null))
                   : h('div', null,
                     seg === 'discipline' ? h('div', null,
                       h('div', { className: 'dshc_hint', style: { marginBottom: 6 } }, '① 实际生效的常驻核心（来源=运行时治理插件，只读' + (effDiscipline ? '；' + String(effDiscipline.text || '').length + ' 字' : '；装配暂未含该段') + '）——模型每回合看到的就是它：'),
@@ -408,18 +449,24 @@ window.__ModuleLoader__.load({
         try { await api('backups/restore', { method: 'PUT', body: { name } }); await load(); setMsg({ title: '已回滚', detail: '已回滚到 ' + name + '（回滚前已再快照）' }); }
         catch (e) { setMsg({ title: '回滚失败', detail: String((e && e.message) || e) }); }
       };
-      const showDetail = async (name) => {
+      const showDetail = async (name, idx) => {
         try {
           const v = await api('backups/detail?name=' + encodeURIComponent(name));
+          const byFile = {};
+          (v.files || []).forEach((f) => { byFile[f.file] = f; });
+          const disc = byFile['discipline.md'];
+          const row = (title, desc) => h('li', { key: title, style: { fontSize: 12, margin: '4px 0' } },
+            h('b', null, title), ' —— ' + desc);
           setModal({
-            title: '快照详情 · ' + name,
+            title: '快照 #' + idx + ' · ' + fmtSnapDate(name),
             body: h('div', null,
-              h('p', null, '这份快照里保存了以下文件（回滚＝把这些文件恢复为此刻的内容）：'),
-              h('ul', null, (v.files || []).map((f) => h('li', { key: f.file, style: { fontSize: 12, margin: '4px 0' } },
-                h('b', null, f.file), ' —— ' + f.lines + ' 行 / ' + f.bytes + ' 字节',
-                f.head ? h('div', { style: { color: 'var(--dsw-alias-label-secondary)', marginTop: 2 } }, '开头：' + f.head) : null))),
-              v.settings ? h('p', null, '当时的开关状态：' + Object.entries(v.settings).filter(([k]) => k !== 'version').map(([k, val]) => k + '=' + JSON.stringify(val)).join('，')) : null,
-              h('p', null, '提示：快照是「改提示词前」的自动备份——不确定回哪个时，先看详情里各文件内容再决定。')),
+              h('p', null, '这份快照记录了当时的提示词状态（回滚＝恢复到这份状态）：'),
+              h('ul', null,
+                disc ? row('纪律核心', disc.lines > 0 ? disc.lines + ' 行：' + disc.head : '空（当时使用运行时默认纪律）') : null,
+                byFile['override.md'] ? row('接管官方', byFile['override.md'].lines > 0 ? '已接管：' + byFile['override.md'].head : '空（未接管）') : null,
+                v.scope ? row('作用域规则', v.scope.count + ' 条' + (v.scope.paths.length ? '（针对 ' + v.scope.paths.join('、') + ' 等工作区）' : '')) : null,
+                v.settings ? row('注入与开关', Object.entries(v.settings).filter(([k]) => k !== 'version').map(([k, val]) => k + '=' + JSON.stringify(val)).join('，')) : null),
+              h('p', null, '提示：快照是「改提示词前」的自动备份——不确定回哪个时，先比对上面几条再决定。')),
             actions: h('div', { className: 'dshc_row' },
               h('button', { className: 'dshc_btn', 'data-danger': true, onClick: () => void restore(name) }, '回滚到此版本'),
               h('button', { className: 'dshc_btn', onClick: () => setModal(null) }, '关闭')),
@@ -438,12 +485,12 @@ window.__ModuleLoader__.load({
           h('ul', { className: 'dshc_audit' },
             entries === null ? h('li', { className: 'dshc_empty' }, '读取中…')
               : entries.length === 0 ? h('li', { className: 'dshc_empty' }, '暂无快照——第一次在上方修改提示词时会自动生成')
-              : entries.map((b) => h('li', { key: b.name, style: { display: 'flex', alignItems: 'center', gap: 12, padding: '12px 0', borderBottom: '1px solid var(--dsw-alias-border-l2)' } },
+              : entries.map((b, i) => h('li', { key: b.name, style: { display: 'flex', alignItems: 'center', gap: 12, padding: '12px 0', borderBottom: '1px solid var(--dsw-alias-border-l2)' } },
                 h('div', { style: { flex: 1 } },
-                  h('div', { style: { fontWeight: 600, fontSize: 13 } }, '提示词备份 · ' + fmtSnapDate(b.name)),
+                  h('div', { style: { fontWeight: 600, fontSize: 13 } }, '提示词备份 #' + (entries.length - i) + ' · ' + fmtSnapDate(b.name)),
                   h('div', { className: 'dshc_hint', style: { marginTop: 3 } }, '包含 ' + (b.files || []).length + ' 个文件（纪律核心、开关状态等）')),
                 h('span', null,
-                  h('button', { className: 'dshc_btn', onClick: () => void showDetail(b.name) }, '详情'),
+                  h('button', { className: 'dshc_btn', onClick: () => void showDetail(b.name, entries.length - i) }, '详情'),
                   ' ',
                   h('button', { className: 'dshc_btn', onClick: () => setModal({
                     title: '回滚到 ' + fmtSnapDate(b.name) + '？',
@@ -477,9 +524,8 @@ window.__ModuleLoader__.load({
       return h('div', null,
         h('div', { className: 'dshc_panel', style: { marginBottom: 14 } },
           h('div', { className: 'dshc_ph' }, h('h3', null, '统计数据'), h('span', { className: 'dshc_spacer' }),
-            h('span', { className: 'dshc_hint' }, '时间范围'),
-            h('select', { className: 'dshc_select', value: range, onChange: (e) => setRange(e.target.value) },
-              h('option', { value: 'all' }, '全部'), h('option', { value: 'week' }, '最近 7 天'), h('option', { value: 'today' }, '今天')))),
+            h('div', { className: 'dshc_segs' },
+              [['all', '全部'], ['week', '最近 7 天'], ['today', '今天']].map(([k, l]) => h('button', { key: k, 'data-active': range === k, onClick: () => setRange(k) }, l)))),
         h('div', { className: 'dshc_cards' },
           h('div', { className: 'dshc_card' }, h('div', { className: 'k' }, '护栏拦截'), h('div', { className: 'v' }, String(s.guardDeny)), h('div', { className: 's' }, '次绕过页面改提示词被挡')),
           h('div', { className: 'dshc_card' }, h('div', { className: 'k' }, '快照'), h('div', { className: 'v' }, String(s.snapshots)), h('div', { className: 's' }, '个可回滚的提示词备份')),
@@ -500,7 +546,7 @@ window.__ModuleLoader__.load({
             rows.length === 0 ? h('li', { className: 'dshc_empty' }, '该时间范围内暂无动作') : null,
             rows.length > 8 ? h('li', { className: 'dshc_empty' },
               h('button', { className: 'dshc_btn', onClick: () => setShowAll(!showAll) }, showAll ? '收起，只看最近 8 条' : '展开全部 ' + rows.length + ' 条')) : null)),
-        err ? h('div', { className: 'dshc_err' }, h('span', null, err)) : null);
+        err ? h('div', { className: 'dshc_err' }, h('span', null, err)) : null));
     }
 
     // 动作流水人话对照（kind → 用户语言）；未登记的 kind 原样显示（不隐瞒）
@@ -536,6 +582,19 @@ window.__ModuleLoader__.load({
       'renderer-resolve': { l: null, internal: true },
       'render-tolerate': { l: null, internal: true },
       'compaction-signal': { l: null, internal: true },
+    };
+
+    // 渐进分节中文名（出厂 9 节；未登记的显示文件名）
+    const SECTION_LABELS = {
+      '00-加载清单.md': '分节路由清单',
+      'clarify-protocol.md': '澄清协议',
+      'compression-reload.md': '压缩后重载',
+      'docking-truth-list.md': '对接真相清单',
+      'environment-inventory.md': '环境盘点',
+      'goal-mode.md': '目标模式',
+      'l2f-full-workflow.md': 'L2-F 完整流程',
+      'l2s-short-workflow.md': 'L2-S 短流程',
+      'requirements-challenge.md': '需求质疑审查',
     };
 
     // ── ⑤ 治理开关（P46；UI 迭代：switch 心智＋busy 防连点＋错误态不再被早退吞掉）──

@@ -425,24 +425,35 @@ function writeLayeredState(root: string, st: Record<string, boolean>): void {
 function safeLayeredName(name: string): string | null {
   const n = String(name ?? '').trim()
   if (!/^[A-Za-z0-9._\-]+\.md$/.test(n)) return null
-  if (!factoryLayeredNames().includes(n)) return null
+  if (n.startsWith('.') || n.includes('..')) return null // 防路径穿越与隐藏文件
   return n
 }
 
 export function listLayered(root: string): { sections: LayeredSectionView[] } {
   const st = readLayeredState(root)
-  const sections = factoryLayeredNames().map((name) => {
+  const factory = factoryLayeredNames()
+  let customNames: string[] = []
+  try {
+    const ldir = join(root, 'layered')
+    if (existsSync(ldir)) {
+      customNames = readdirSync(ldir).filter((f) => f.endsWith('.md') && !factory.includes(f) && safeLayeredName(f) !== null)
+    }
+  } catch { /* 自建分节目录读不到=无 */ }
+  const sections = [...factory, ...customNames].map((name) => {
+    const isFactory = factory.includes(name)
     const userPath = join(root, 'layered', name)
-    let text = readFileSync(join(FACTORY_LAYERED_DIR, name), 'utf8')
+    let text = isFactory ? readFileSync(join(FACTORY_LAYERED_DIR, name), 'utf8') : ''
     let modified = false
     try {
       if (existsSync(userPath)) {
         text = readFileSync(userPath, 'utf8')
         modified = true
+      } else if (!isFactory) {
+        return null // 自建分节的实体文件已被删除——不再列出
       }
     } catch { /* 读不到用户副本=出厂 */ }
-    return { name, force: forceOfSection(name), enabled: st[name] !== false, modified, chars: text.length, text }
-  })
+    return { name, force: isFactory ? forceOfSection(name) : 'X', enabled: st[name] !== false, modified, chars: text.length, text }
+  }).filter((s): s is LayeredSectionView => s !== null)
   return { sections }
 }
 
@@ -451,6 +462,20 @@ export function readLayeredSection(root: string, name: string): LayeredSectionVi
   if (n === null) return null
   const hit = listLayered(root).sections.find((s) => s.name === n)
   return hit ?? null
+}
+
+/** 删除自建分节（P47）：出厂分节不可删（停用即可）；仅物理删除用户镜像文件。 */
+export function deleteLayeredSection(root: string, name: string): { ok: boolean; error?: string } {
+  const n = safeLayeredName(name)
+  if (n === null) return { ok: false, error: '分节名不合法' }
+  if (factoryLayeredNames().includes(n)) return { ok: false, error: '出厂分节不可删除（可停用或恢复出厂）' }
+  const p = join(root, 'layered', n)
+  if (!existsSync(p)) return { ok: false, error: '分节不存在' }
+  snapshot(root, 'delete-layered')
+  rmSync(p)
+  forgetCachedFile(p)
+  audit(root, { kind: 'layered-deleted', section: n })
+  return { ok: true }
 }
 
 export function saveLayeredSection(root: string, name: string, text: string): LayeredSectionView | null {
@@ -846,20 +871,28 @@ export function listBackups(root: string): BackupEntry[] {
 
 /** 快照详情（P47 UX 批）：每个文件的字节/行数/前 120 字摘要＋settings 键值——让「回滚到哪个状态」可读。 */
 export interface BackupFileDetail { file: string; bytes: number; lines: number; head: string }
-export function backupDetail(root: string, name: string): { name: string; files: BackupFileDetail[]; settings: Record<string, unknown> | null } | null {
+export function backupDetail(root: string, name: string): { name: string; files: BackupFileDetail[]; settings: Record<string, unknown> | null; scope: { count: number; paths: string[] } | null } | null {
   if (!/^[0-9A-Za-z._-]+$/.test(name)) return null
   const dir = join(root, 'backups', name)
   if (!existsSync(dir)) return null
   const files: BackupFileDetail[] = []
   let settings: Record<string, unknown> | null = null
+  let scope: { count: number; paths: string[] } | null = null
   for (const f of readdirSync(dir)) {
     const p = join(dir, f)
     let text = ''
     try { text = readFileSync(p, 'utf8') } catch { continue }
     files.push({ file: f, bytes: Buffer.byteLength(text, 'utf8'), lines: text.split('\n').filter((x) => x.trim() !== '').length, head: text.replace(/\s+/g, ' ').slice(0, 120) })
     if (f === 'settings.json') { try { settings = JSON.parse(text) as Record<string, unknown> } catch { /* 坏档不解析 */ } }
+    if (f === 'scope.json') {
+      try {
+        const j = JSON.parse(text) as { rules?: Array<{ path?: unknown }> }
+        const rules = Array.isArray(j.rules) ? j.rules : []
+        scope = { count: rules.length, paths: rules.slice(0, 3).map((r) => String(r.path ?? '')) }
+      } catch { /* 坏档不解析 */ }
+    }
   }
-  return { name, files, settings }
+  return { name, files, settings, scope }
 }
 
 /** 恢复快照（限 backups 根内；恢复前先对当前状态拍快照，保证可逆）。 */
@@ -1747,6 +1780,13 @@ export function makeApi(
           if (v === null) throw new Error('分节不存在（不在出厂清单）')
           return v
         })
+        return
+      }
+      const mDel = pathname.match(/^\/api\/dsh-custom\/layered\/([^/]+)$/)
+      if (mDel !== null && method === 'DELETE') {
+        const r = deleteLayeredSection(root, decodeURIComponent(mDel[1]))
+        if (!r.ok) { jsonResponse(res, 403, { ok: false, error: r.error }); return }
+        jsonResponse(res, 200, { ok: true, value: { deleted: true } })
         return
       }
     }
