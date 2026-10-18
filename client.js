@@ -601,7 +601,7 @@ window.__ModuleLoader__.load({
 
     // ── ② 系统提示词管理 ──
     function PromptsPage(props) {
-      const factorySet = new Set(['00-加载清单.md', 'clarify-protocol.md', 'compression-reload.md', 'docking-truth-list.md', 'environment-inventory.md', 'goal-mode.md', 'l2f-full-workflow.md', 'l2s-short-workflow.md', 'requirements-challenge.md']); // 与出厂 content/layered 清单同步
+      const factorySet = new Set(['00-加载清单.md', 'clarify-protocol.md', 'compression-reload.md', 'docking-truth-list.md', 'environment-inventory.md', 'goal-mode.md', 'l2f-full-workflow.md', 'l2s-short-workflow.md', 'requirements-challenge.md', 'tool-triggers.md']); // 与出厂 content/layered 清单同步
       const [seg, setSeg] = useState('discipline');
       const [data, setData] = useState({ discipline: null, user: null, layered: null, override: null, asm: null });
       const [draft, setDraft] = useState('');
@@ -1096,6 +1096,7 @@ window.__ModuleLoader__.load({
       'l2f-full-workflow.md': 'L2-F 完整流程',
       'l2s-short-workflow.md': 'L2-S 短流程',
       'requirements-challenge.md': '需求质疑审查',
+      'tool-triggers.md': '工具触发矩阵',
     };
 
     // ── ⑤ 治理开关（P46；UI 迭代：switch 心智＋busy 防连点＋错误态不再被早退吞掉）──
