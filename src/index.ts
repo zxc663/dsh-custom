@@ -4,7 +4,7 @@
 //   ③ 装配读取：ctx.systemPrompt.assemble() → 分区归属 + renderPrompt 实际渲染（只读）
 //   ④ HTTP 数据面：/api/dsh-custom/{assembly,status}（webServer 服务；浏览器半 client.js 消费）
 // 设计档：D:/DeepSeek/dsh-plugin-dev/docs/design-specs/dsh-custom-prompt-design-20261017.md
-import { appendFileSync, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { appendFileSync, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { createRequire } from 'node:module'
 import { homedir } from 'node:os'
@@ -238,6 +238,15 @@ function readCachedFile(p: string): { text: string; mtimeMs: number } | null {
   }
 }
 
+/**
+ * 插件自身写盘后立即失效该路径的 mtime 缓存（#决策 2026-10-19 D3）：
+ * mtimeMs 精度有限，同一时间片内的「写 → 立即读」可能命中旧缓存；写后主动失效即可保证读到新值。
+ * 只做「写后失效」，读取路径仍走 mtime 缓存（性能口径不变）。
+ */
+function forgetCachedFile(p: string): void {
+  fileCache.delete(p)
+}
+
 /** 插件自身写入后登记哈希：避免下一次外部改动检测把本插件的写误报为会话外改动。 */
 function recordHashes(root: string, files: string[]): void {
   const metaPath = join(root, 'meta.json')
@@ -300,6 +309,7 @@ export function readDiscipline(root: string): DisciplineState {
 export function saveDiscipline(root: string, text: string): DisciplineState {
   snapshot(root, 'save-discipline')
   writeFileSync(join(root, 'discipline.md'), text, 'utf8')
+  forgetCachedFile(join(root, 'discipline.md'))
   recordHashes(root, ['discipline.md'])
   audit(root, { kind: 'discipline-saved', bytes: Buffer.byteLength(text, 'utf8') })
   return readDiscipline(root)
@@ -343,8 +353,10 @@ function readSettingsJson(root: string): { injectEnabled?: boolean; overrideEnab
 export function saveUserPrompt(root: string, text: string, enabled = true): UserPromptState {
   snapshot(root, 'save-user-prompt')
   writeFileSync(join(root, 'user-prompt.md'), text, 'utf8')
+  forgetCachedFile(join(root, 'user-prompt.md'))
   const merged = { ...(readSettingsJson(root) ?? {}), userPromptEnabled: enabled }
   writeFileSync(join(root, 'settings.json'), JSON.stringify(merged, null, 2) + '\n', 'utf8')
+  forgetCachedFile(join(root, 'settings.json'))
   recordHashes(root, ['user-prompt.md'])
   audit(root, { kind: 'user-prompt-saved', bytes: Buffer.byteLength(text, 'utf8'), enabled })
   return readUserPrompt(root)
@@ -404,6 +416,7 @@ function readLayeredState(root: string): Record<string, boolean> {
 
 function writeLayeredState(root: string, st: Record<string, boolean>): void {
   writeFileSync(join(root, 'layered-state.json'), JSON.stringify({ version: 1, enabled: st }, null, 2) + '\n', 'utf8')
+  forgetCachedFile(join(root, 'layered-state.json'))
 }
 
 function safeLayeredName(name: string): string | null {
@@ -443,6 +456,7 @@ export function saveLayeredSection(root: string, name: string, text: string): La
   snapshot(root, 'save-layered')
   mkdirSync(join(root, 'layered'), { recursive: true })
   writeFileSync(join(root, 'layered', n), text, 'utf8')
+  forgetCachedFile(join(root, 'layered', n))
   audit(root, { kind: 'layered-saved', section: n, bytes: Buffer.byteLength(text, 'utf8') })
   return readLayeredSection(root, n)
 }
@@ -454,6 +468,7 @@ export function resetLayeredSection(root: string, name: string): LayeredSectionV
   if (existsSync(p)) {
     snapshot(root, 'reset-layered')
     rmSync(p, { force: true })
+    forgetCachedFile(p)
   }
   audit(root, { kind: 'layered-reset', section: n })
   return readLayeredSection(root, n)
@@ -531,6 +546,7 @@ export function saveScope(root: string, rules: unknown): ScopeState {
   })
   snapshot(root, 'save-scope')
   writeFileSync(join(root, 'scope.json'), JSON.stringify({ version: 1, rules: normalized }, null, 2) + '\n', 'utf8')
+  forgetCachedFile(join(root, 'scope.json'))
   recordHashes(root, ['scope.json'])
   audit(root, { kind: 'scope-saved', rules: normalized.length })
   return { version: 1, rules: normalized }
@@ -591,6 +607,7 @@ export function saveSettings(root: string, patch: { injectEnabled?: unknown; ove
     overrideEnabled: typeof patch.overrideEnabled === 'boolean' ? patch.overrideEnabled : cur.overrideEnabled,
   }
   writeFileSync(join(root, 'settings.json'), JSON.stringify({ version: 1, injectEnabled: next.enabled, overrideEnabled: next.overrideEnabled }, null, 2) + '\n', 'utf8')
+  forgetCachedFile(join(root, 'settings.json'))
   recordHashes(root, ['settings.json'])
   audit(root, { kind: 'settings-saved', injectEnabled: next.enabled, overrideEnabled: next.overrideEnabled })
   return next
@@ -692,11 +709,126 @@ export function restoreBackup(root: string, name: string): { restored: string[];
   const restored: string[] = []
   for (const f of files) {
     copyFileSync(join(abs, f), join(root, f))
+    forgetCachedFile(join(root, f))
     restored.push(f)
   }
   recordHashes(root, restored)
   audit(root, { kind: 'backup-restored', name, files: restored })
   return { restored, preRestoreSnapshot: pre }
+}
+
+// ── 会话级覆盖（页面重构）：每会话一目录，分段文件（discipline/user/layered/system），
+// 保存前自动快照到 sessions/<id>/backups/<ts>/；回滚两档（official=清空覆盖 / previous=恢复上一版）。
+// 优先级由注入层保证：会话级 > 全局；全局改不触碰 sessions/。
+const SESSION_SEGMENTS = ['discipline', 'user', 'layered', 'system'] as const
+export type SessionSegment = (typeof SESSION_SEGMENTS)[number]
+
+export function sessionDir(root: string, id: string): string {
+  const safe = String(id ?? '').replace(/[^A-Za-z0-9_-]/g, '')
+  if (!safe) throw new Error('非法会话 id')
+  return join(root, 'sessions', safe)
+}
+
+export function readSessionOverride(root: string, id: string): Record<string, string | null> {
+  const dir = sessionDir(root, id)
+  const out: Record<string, string | null> = {}
+  for (const seg of SESSION_SEGMENTS) {
+    try { out[seg] = readFileSync(join(dir, seg + '.md'), 'utf8') } catch { out[seg] = null }
+  }
+  return out
+}
+
+function snapshotSession(root: string, id: string): string | null {
+  const dir = sessionDir(root, id)
+  if (!existsSync(dir)) return null
+  const files = SESSION_SEGMENTS.filter((seg) => existsSync(join(dir, seg + '.md')))
+  if (files.length === 0) return null
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-')
+  const dest = join(dir, 'backups', stamp)
+  mkdirSync(dest, { recursive: true })
+  for (const seg of files) {
+    try { copyFileSync(join(dir, seg + '.md'), join(dest, seg + '.md')) } catch { /* 单段失败不阻塞 */ }
+  }
+  return stamp
+}
+
+export function writeSessionOverride(
+  root: string,
+  id: string,
+  segments: Record<string, string | null>,
+): { written: string[]; snapshot: string | null } {
+  const snap = snapshotSession(root, id)
+  const dir = sessionDir(root, id)
+  mkdirSync(dir, { recursive: true })
+  const written: string[] = []
+  for (const seg of SESSION_SEGMENTS) {
+    if (!(seg in segments)) continue
+    const p = join(dir, seg + '.md')
+    const v = segments[seg]
+    if (v === null || v === '') {
+      try { unlinkSync(p) } catch { /* 已不存在 */ }
+      forgetCachedFile(p)
+    } else {
+      writeFileSync(p, v, 'utf8')
+      forgetCachedFile(p)
+    }
+    written.push(seg)
+  }
+  audit(root, { kind: 'session-override-saved', session: id, segments: written })
+  return { written, snapshot: snap }
+}
+
+export function rollbackSession(
+  root: string,
+  id: string,
+  target: 'official' | 'previous',
+): { cleared: string[]; restored: string[] } {
+  const dir = sessionDir(root, id)
+  const snap = snapshotSession(root, id)
+  if (target === 'official') {
+    const cleared: string[] = []
+    for (const seg of SESSION_SEGMENTS) {
+      const p = join(dir, seg + '.md')
+      try {
+        unlinkSync(p)
+        forgetCachedFile(p)
+        cleared.push(seg)
+      } catch { /* 不存在 */ }
+    }
+    audit(root, { kind: 'session-rollback', session: id, target, snapshot: snap })
+    return { cleared, restored: [] }
+  }
+  const b = join(dir, 'backups')
+  if (!existsSync(b)) throw new Error('该会话暂无历史版本')
+  const names = readdirSync(b).filter((n) => /^[0-9A-Za-z._-]+$/.test(n)).sort((x, y) => (x < y ? 1 : -1))
+  const latest = names.find((n) => n !== snap)
+  if (latest === undefined) throw new Error('该会话暂无上一版')
+  const restored: string[] = []
+  for (const seg of SESSION_SEGMENTS) {
+    const src = join(b, latest, seg + '.md')
+    if (!existsSync(src)) continue
+    const dst = join(dir, seg + '.md')
+    copyFileSync(src, dst)
+    forgetCachedFile(dst)
+    restored.push(seg)
+  }
+  // #决策 2026-10-19 D2：快照里没有、但当前目录还留着的段＝「快照之后新增的段」，必须一并摘掉，
+  // 否则回滚不彻底（如 v1={discipline}、v2={discipline,system} 时 system.md 会残留并继续注入）。
+  const cleared: string[] = []
+  for (const seg of SESSION_SEGMENTS) {
+    if (restored.includes(seg)) continue
+    const p = join(dir, seg + '.md')
+    if (!existsSync(p)) continue
+    try {
+      unlinkSync(p)
+      forgetCachedFile(p)
+      cleared.push(seg)
+    } catch (e) {
+      console.warn('[dsh-custom] 回滚清理多余段失败：', seg, String((e as { message?: unknown })?.message ?? e))
+    }
+  }
+  audit(root, { kind: 'session-rollback', session: id, target: 'previous', version: latest, cleared })
+  return { cleared, restored }
 }
 
 /** 注册深改接管段（complete 独占：整段替换系统提示词段列表；工具/上下文照常）。 */
@@ -735,15 +867,175 @@ export function registerDiscipline(svc: { section: (section: unknown) => () => v
   })
 }
 
-/** 按 agent 作用域注册同名纪律段（遮蔽全局；cwd 每次组装实时读取 ⇒ 位置转移自动跟随）。 */
-export function registerDisciplineForAgent(agent: { ctx: { inject: (svcs: string[], cb: (scope: any) => void) => any }; session?: { header?: { cwd?: string } } }, root: string): unknown {
+// ── 会话级注入接线（P0 缺口修复）：会话覆盖不再「只存不读」，四段全部进入装配 ──
+// 优先级：总开关 > 会话级 > 全局。discipline/user/layered 的 text 是函数（宿主每次组装实时求值 ⇒
+// 会话文件改完即生效，无需重同步）；只有 system 是 complete 段，「挂不挂」取决于注册那一刻的文本
+// 是否非空 ⇒ 保存/回滚后必须写后重同步（见 apply 的 syncSessionSystem）。
+
+export const SESSION_LAYERED_SECTION = 'dsh-custom:layered'
+export const SESSION_LAYERED_ORDER = -1980
+
+/**
+ * 读会话级某段原文：trim 后非空 → 原文（保留用户排版）；空/缺失/非法 id → null（=该段无会话级覆盖）。
+ * 非法或空 id 时 sessionDir 会抛错，此处必须吞掉：注入期抛错会连累整条系统提示词装配。
+ */
+function sessionSegmentText(root: string, id: string, seg: SessionSegment): string | null {
+  // 空 id 是常态（全局引用/宿主未给 id）：走快路径直接判「无会话级覆盖」，不靠异常兜底
+  if (String(id ?? '').length === 0) return null
+  let dir = ''
+  try {
+    dir = sessionDir(root, id)
+  } catch {
+    /* 非法会话 id（sessionDir 归一后为空）＝无会话级覆盖，不得抛给调用方 */
+    return null
+  }
+  const text = readCachedFile(join(dir, seg + '.md'))?.text ?? ''
+  return text.trim().length > 0 ? text : null
+}
+
+/**
+ * 会话级纪律文本（装配期求值）：
+ * ①总开关关 → ''（总开关是最高优先级，会话级不得绕过——否则「关」形同虚设）；
+ * ②会话 discipline 非空 → 会话文本；
+ * ③否则回退全局口径（工作区规则 > 全局 discipline.md，语义见 disciplineTextFor）。
+ */
+export function sessionDisciplineTextFor(root: string, agentId: string, cwd?: string | null): string {
+  if (!readInjectSettings(root).enabled) return ''
+  const own = sessionSegmentText(root, agentId, 'discipline')
+  if (own !== null) return own
+  return disciplineTextFor(root, cwd ?? null)
+}
+
+/**
+ * 会话级「我的提示词」：会话 user 非空 → 会话文本；否则回退全局 user-prompt.md。
+ * #决策 2026-10-18（D4 已定）：`userPromptEnabled` 是**功能级开关，只关全局**，不否决会话级——
+ * 本会话写了 user 段就注入，要停用请把该段清空（留空=关闭该段）。口径与「总开关只管 discipline」一致。
+ */
+export function sessionUserPromptTextFor(root: string, agentId: string): string {
+  const own = sessionSegmentText(root, agentId, 'user')
+  return own !== null ? own : userPromptTextFor(root)
+}
+
+/**
+ * 会话级渐进加载层：会话 layered 非空 → 文本；否则 ''。
+ * 注意**不回退全局**：全局 layered 是「按需读取的路由表」，本来就不进装配，回退等于假注入。
+ */
+export function sessionLayeredTextFor(root: string, agentId: string): string {
+  return sessionSegmentText(root, agentId, 'layered') ?? ''
+}
+
+/**
+ * 会话级 system 覆盖文本：会话 system 非空 → 文本；否则 ''。
+ * 该段以 complete 注册（整段替换系统提示词段列表），**空文本绝不可注册**（会把整条提示词清空）。
+ */
+export function sessionSystemTextFor(root: string, agentId: string): string {
+  return sessionSegmentText(root, agentId, 'system') ?? ''
+}
+
+/**
+ * 在已注入的 systemPrompt 作用域上挂会话级 complete 段（仅当文本非空；空文本保持不挂）。
+ *
+ * #决策 2026-10-19 D1（不变量）：该段 text() **永不返回空串**。complete 段拿到空文本＝整条系统提示词被清空，
+ * 而「挂不挂」在注册期就定死了；会话文件可能在注册后被外部删除/清空，故组装期必须自兜底：
+ * ①会话 system 非空 → 更新 lastNonEmpty 并返回；
+ * ②为空且全局深改开着且非空 → 返回全局接管文本（会话级失效即回落全局，符合「会话级 > 全局」）；
+ * ③再否则返回 lastNonEmpty（注册时捕获的最近一次非空文本）。
+ * 首次发生回落时留痕一次（闭包布尔量，不每次组装都写审计）。
+ *
+ * @param onSection 可选：把该段的注销函数交回调用方（写后重同步需要单独注销它）。
+ * @returns true=已注册。
+ */
+function applySessionSystemSection(
+  scope: any,
+  root: string,
+  id: string,
+  onSection?: (dispose: () => void) => void,
+): boolean {
+  const initial = sessionSystemTextFor(root, id)
+  if (initial.trim().length === 0) return false
+  let lastNonEmpty = initial
+  let fallbackAudited = false
+  const dispose = scope.systemPrompt.section({
+    name: OVERRIDE_SECTION,
+    order: 0,
+    complete: true,
+    // 不变量：本函数永不返回空串（见上方注释）
+    text: () => {
+      const own = sessionSystemTextFor(root, id)
+      if (own.trim().length > 0) {
+        lastNonEmpty = own
+        return own
+      }
+      const global = readOverride(root)
+      if (global.enabled && global.text.trim().length > 0) {
+        if (!fallbackAudited) {
+          fallbackAudited = true
+          audit(root, { kind: 'session-system-empty-at-assemble', session: id, fallback: 'global-override' })
+        }
+        return global.text
+      }
+      if (!fallbackAudited) {
+        fallbackAudited = true
+        audit(root, { kind: 'session-system-empty-at-assemble', session: id, fallback: 'last-nonempty' })
+      }
+      return lastNonEmpty
+    },
+  })
+  if (typeof dispose === 'function' && typeof onSection === 'function') onSection(dispose as () => void)
+  return true
+}
+
+/**
+ * 单独注册会话级 system 段（写后重同步用）。调用方必须先注销旧段，避免同名 complete 段叠加。
+ */
+function registerSessionSystemForAgent(
+  agent: { ctx: { inject: (svcs: string[], cb: (scope: any) => void) => any } },
+  root: string,
+  id: string,
+  onSection?: (dispose: () => void) => void,
+): unknown {
+  return agent.ctx.inject(['systemPrompt'], (scope: any) => {
+    applySessionSystemSection(scope, root, id, onSection)
+  })
+}
+
+/**
+ * 按 agent 作用域注册四段（同名段遮蔽全局；cwd 每次组装实时读取 ⇒ 位置转移自动跟随）：
+ * ①discipline（order −2000，interpolate:false）②user-prompt（order −1990）
+ * ③layered（order −1980）④system（complete，order 0）——④ 仅在注册时文本非空才挂。
+ * 空/缺失 agent.id ⇒ 四段全部走全局回退（不读 sessions/）。
+ * @param onSystemSection 可选：把会话 system 段的注销函数交回调用方（apply 的写后重同步需要）。
+ */
+export function registerDisciplineForAgent(
+  agent: {
+    id?: string
+    ctx: { inject: (svcs: string[], cb: (scope: any) => void) => any }
+    session?: { header?: { cwd?: string } }
+  },
+  root: string,
+  onSystemSection?: (dispose: () => void) => void,
+): unknown {
+  const id = String((agent as { id?: unknown })?.id ?? '')
   return agent.ctx.inject(['systemPrompt'], (scope: any) => {
     scope.systemPrompt.section({
       name: DISCIPLINE_SECTION,
       order: DISCIPLINE_ORDER,
       interpolate: false,
-      text: () => disciplineTextFor(root, agent?.session?.header?.cwd ?? null),
+      text: () => sessionDisciplineTextFor(root, id, agent?.session?.header?.cwd ?? null),
     })
+    scope.systemPrompt.section({
+      name: USER_PROMPT_SECTION,
+      order: USER_PROMPT_ORDER,
+      interpolate: false,
+      text: () => sessionUserPromptTextFor(root, id),
+    })
+    scope.systemPrompt.section({
+      name: SESSION_LAYERED_SECTION,
+      order: SESSION_LAYERED_ORDER,
+      interpolate: false,
+      text: () => sessionLayeredTextFor(root, id),
+    })
+    applySessionSystemSection(scope, root, id, onSystemSection)
   })
 }
 
@@ -1033,8 +1325,8 @@ function readJsonBody(req: any, limit = 1024 * 1024): Promise<Record<string, unk
 }
 
 export interface AgentsView {
-  list: () => Array<{ id: string; cwd: string | null }>
-  resolve: (id: string) => { agent: unknown; cwd: string | null } | null
+  list: () => Array<{ id: string; cwd: string | null; model: string | null; title: string | null }>
+  resolve: (id: string) => { agent: unknown; cwd: string | null; model: string | null; title: string | null } | null
 }
 
 export function makeApi(
@@ -1044,11 +1336,21 @@ export function makeApi(
   loader?: RendererLoader,
   onAccess?: () => void,
   agentsView?: AgentsView,
+  onSessionChanged?: (id: string) => void,
 ): (req: any, res: any) => void {
   const handlePut = (req: any, res: any, run: (body: Record<string, unknown>) => unknown): void => {
     readJsonBody(req)
       .then((body) => jsonResponse(res, 200, { ok: true, value: run(body) }))
       .catch((e: unknown) => jsonResponse(res, 400, { ok: false, error: String((e as { message?: unknown })?.message ?? e) }))
+  }
+  /** 会话级覆盖落盘后通知注入层重同步（未接线时静默跳过；失败只告警，不影响本次保存结果）。 */
+  const notifySessionChanged = (id: string): void => {
+    if (onSessionChanged === undefined) return
+    try {
+      onSessionChanged(id)
+    } catch (e) {
+      console.warn('[dsh-custom] 会话级段重同步失败：', String((e as { message?: unknown })?.message ?? e))
+    }
   }
   const access = (): void => {
     if (onAccess === undefined) return
@@ -1098,6 +1400,81 @@ export function makeApi(
         return
       }
       jsonResponse(res, 200, { ok: true, value: { sessions: agentsView?.list() ?? [] } })
+      return
+    }
+    if (pathname === '/api/dsh-custom/stats') {
+      if (method !== 'GET') {
+        jsonResponse(res, 405, { ok: false, error: 'method not allowed' })
+        return
+      }
+      try {
+        const raw = readCachedFile(join(root, 'audit.jsonl'))?.text ?? ''
+        const entries: Array<Record<string, unknown>> = []
+        let guardDeny = 0
+        let externalChange = 0
+        for (const line of raw.split('\n')) {
+          if (!line.trim()) continue
+          try {
+            const j = JSON.parse(line) as Record<string, unknown>
+            entries.push(j)
+            if (j.kind === 'guard-deny') guardDeny += 1
+            if (j.kind === 'external-change') externalChange += 1
+          } catch { /* 坏行跳过，不阻塞统计 */ }
+        }
+        const backups = listBackups(root)
+        const sessions = agentsView?.list() ?? []
+        jsonResponse(res, 200, {
+          ok: true,
+          value: {
+            guardDeny,
+            externalChange,
+            snapshots: backups.length,
+            sessions: sessions.length,
+            audit: entries.slice(-20),
+          },
+        })
+      } catch (e: unknown) {
+        jsonResponse(res, 500, { ok: false, error: String((e as { message?: unknown })?.message ?? e) })
+      }
+      return
+    }
+    const sessionOverrideMatch = /^\/api\/dsh-custom\/sessions\/([^/]+)\/override$/.exec(pathname)
+    if (sessionOverrideMatch !== null) {
+      let sid = ''
+      try { sid = decodeURIComponent(sessionOverrideMatch[1]) } catch { sid = sessionOverrideMatch[1] }
+      if (method === 'GET') {
+        try {
+          jsonResponse(res, 200, { ok: true, value: { segments: readSessionOverride(root, sid) } })
+        } catch (e: unknown) {
+          jsonResponse(res, 400, { ok: false, error: String((e as { message?: unknown })?.message ?? e) })
+        }
+        return
+      }
+      if (method === 'PUT') {
+        handlePut(req, res, (body) => {
+          const result = writeSessionOverride(root, sid, (body.segments ?? {}) as Record<string, string | null>)
+          notifySessionChanged(sid)
+          return result
+        })
+        return
+      }
+      jsonResponse(res, 405, { ok: false, error: 'method not allowed' })
+      return
+    }
+    const sessionRollbackMatch = /^\/api\/dsh-custom\/sessions\/([^/]+)\/rollback$/.exec(pathname)
+    if (sessionRollbackMatch !== null) {
+      if (method !== 'POST') {
+        jsonResponse(res, 405, { ok: false, error: 'method not allowed' })
+        return
+      }
+      let sid = ''
+      try { sid = decodeURIComponent(sessionRollbackMatch[1]) } catch { sid = sessionRollbackMatch[1] }
+      handlePut(req, res, (body) => {
+        const target: 'official' | 'previous' = String(body.target ?? 'official') === 'previous' ? 'previous' : 'official'
+        const result = rollbackSession(root, sid, target)
+        notifySessionChanged(sid)
+        return result
+      })
       return
     }
     if (pathname === '/api/dsh-custom/status') {
@@ -1271,6 +1648,7 @@ export function makeApi(
             }
             snapshot(root, 'save-override')
             writeFileSync(join(root, 'override.md'), body.text, 'utf8')
+            forgetCachedFile(join(root, 'override.md'))
             recordHashes(root, ['override.md'])
             audit(root, { kind: 'override-saved', bytes: Buffer.byteLength(body.text, 'utf8') })
             access()
@@ -1433,21 +1811,112 @@ export function apply(ctx: any): () => void {
   const agentsView: AgentsView = {
     list: () =>
       ((agentsRef?.list() ?? []) as any[])
-        .map((a) => ({ id: String(a?.id ?? ''), cwd: typeof a?.session?.header?.cwd === 'string' ? a.session.header.cwd : null }))
+        .map((a) => ({
+          id: String(a?.id ?? ''),
+          cwd: typeof a?.session?.header?.cwd === 'string' ? a.session.header.cwd : null,
+          model: typeof a?.session?.header?.model === 'string' ? a.session.header.model : (typeof a?.model === 'string' ? a.model : null),
+          title: typeof a?.session?.header?.title === 'string' ? a.session.header.title : (typeof a?.title === 'string' ? a.title : null),
+        }))
         .filter((x) => x.id.length > 0),
     resolve: (id: string) => {
       const agent = agentsRef?.get(id) ?? null
       if (agent === null || agent === undefined) return null
-      return { agent, cwd: typeof agent?.session?.header?.cwd === 'string' ? agent.session.header.cwd : null }
+      return {
+        agent,
+        cwd: typeof agent?.session?.header?.cwd === 'string' ? agent.session.header.cwd : null,
+        model: typeof agent?.session?.header?.model === 'string' ? agent.session.header.model : (typeof agent?.model === 'string' ? agent.model : null),
+        title: typeof agent?.session?.header?.title === 'string' ? agent.session.header.title : (typeof agent?.title === 'string' ? agent.title : null),
+      }
     },
   }
   const scopedDisciplineFibers = new Map<unknown, unknown>()
+  // 会话 system 段（complete）单独持注销句柄：「挂不挂」由注册时刻的文本决定，写后必须重同步。
+  // 两种句柄都只影响 system 段：①首次注册拿「段级」注销函数（inject fiber 与另三段共用，不能整体 dispose）；
+  // ②写后重同步新建的 fiber 只含 system 段，注销用 fiber.dispose（不留空 fiber）。
+  const sessionSystemFibers = new Map<string, () => void>()
+  const dropSessionSystem = (id: string): void => {
+    const old = sessionSystemFibers.get(id)
+    if (old === undefined) return
+    sessionSystemFibers.delete(id)
+    try {
+      old()
+    } catch (e) {
+      console.warn('[dsh-custom] 会话 system 段注销失败：', String((e as { message?: unknown })?.message ?? e))
+    }
+  }
+  const trackSessionSystem = (id: string, dispose: () => void): void => {
+    if (id.length === 0) return
+    dropSessionSystem(id)
+    sessionSystemFibers.set(id, dispose)
+  }
   const installScopedDiscipline = (agent: any): void => {
     if (scopedDisciplineFibers.has(agent)) return
+    const id = String((agent as { id?: unknown })?.id ?? '')
     try {
-      scopedDisciplineFibers.set(agent, registerDisciplineForAgent(agent, root))
+      scopedDisciplineFibers.set(
+        agent,
+        registerDisciplineForAgent(agent, root, (dispose) => trackSessionSystem(id, dispose)),
+      )
     } catch (e) {
       console.warn('[dsh-custom] 作用域纪律段注册失败：', String((e as { message?: unknown })?.message ?? e))
+    }
+  }
+  /**
+   * 会话级保存/回滚后的写后重同步：discipline/user/layered 的 text 是函数（每次组装实时求值），
+   * **不需要**重同步；只有 system 段是 complete 且「挂/摘」在注册时定死 —— 这里按当前文本重新决定。
+   * 未活跃会话不必处理：它下次创建时 installScopedDiscipline 会按当时文件重新判定。
+   */
+  const syncSessionSystem = (id: string): void => {
+    const agent = agentsRef?.get(id) ?? null
+    if (agent === null || agent === undefined) return
+    dropSessionSystem(id)
+    if (sessionSystemTextFor(root, id).trim().length === 0) {
+      audit(root, { kind: 'session-system-cleared', session: id })
+      return
+    }
+    try {
+      // #决策 2026-10-19 P1：注销句柄不得依赖宿主返回值。
+      // 主句柄＝段级 dispose（section() 的返回值，不依赖 inject 返回什么）；次句柄＝fiber.dispose（若存在，
+      // 顺手清掉这条只含 system 段的空 fiber）。只认 fiber 的话，宿主 inject 返回 undefined 时清空就摘不掉段，
+      // text() 会回落 lastNonEmpty ⇒ 用户清空后模型继续收到旧文本（P0 症状复发）。
+      let sectionDispose: (() => void) | null = null
+      const fiber = registerSessionSystemForAgent(agent, root, id, (d) => {
+        sectionDispose = d
+      })
+      const fiberDispose = (fiber as { dispose?: unknown })?.dispose
+      const hasFiberDispose = typeof fiberDispose === 'function'
+      const hasSectionDispose = typeof sectionDispose === 'function'
+      if (hasSectionDispose || hasFiberDispose) {
+        sessionSystemFibers.set(id, () => {
+          // 先摘段（主路径），再收空 fiber；两个各自兜错，任一失败不影响另一个。
+          // 段级句柄在注销时按引用再读一次：宿主若异步回调 section 注册，也能拿到迟到的句柄。
+          if (typeof sectionDispose === 'function') {
+            try {
+              sectionDispose()
+            } catch (e) {
+              console.warn('[dsh-custom] 会话 system 段注销失败（段级句柄）：', String((e as { message?: unknown })?.message ?? e))
+            }
+          }
+          if (hasFiberDispose) {
+            try {
+              void (fiber as { dispose: () => unknown }).dispose()
+            } catch (e) {
+              console.warn('[dsh-custom] 会话 system 段清理失败（fiber 句柄）：', String((e as { message?: unknown })?.message ?? e))
+            }
+          }
+        })
+      } else {
+        // 段级与 fiber 句柄都拿不到＝真正的风险场景：段会常驻，下次保存可能叠加同名 complete 段
+        console.warn('[dsh-custom] 会话 system 段已注册但段级/fiber 句柄都拿不到（下次保存可能叠加同名段）')
+      }
+      audit(root, { kind: 'session-system-applied', session: id })
+      // #决策 2026-10-19 D6：全局深改同时开着时，会话级 complete 段会遮蔽全局接管段（同名段作用域遮蔽），
+      // 留一条痕便于实机取证「为什么看到的是会话文本而不是全局接管文本」。
+      if (readInjectSettings(root).overrideEnabled && readOverride(root).text.trim().length > 0) {
+        audit(root, { kind: 'session-system-shadows-global', session: id })
+      }
+    } catch (e) {
+      console.warn('[dsh-custom] 会话 system 段重注册失败：', String((e as { message?: unknown })?.message ?? e))
     }
   }
   ctx.inject(['agents'], (agentsCtx: any) => {
@@ -1455,6 +1924,7 @@ export function apply(ctx: any): () => void {
     for (const agent of agentsCtx.agents.list()) installScopedDiscipline(agent)
     agentsCtx.on('agent/created', ({ agent }: { agent: unknown }) => installScopedDiscipline(agent))
     agentsCtx.on('agent/disposed', ({ agent }: { agent: unknown }) => {
+      dropSessionSystem(String((agent as { id?: unknown })?.id ?? ''))
       const fiber = scopedDisciplineFibers.get(agent)
       if (fiber === undefined) return
       scopedDisciplineFibers.delete(agent)
@@ -1467,7 +1937,7 @@ export function apply(ctx: any): () => void {
   const rendererLoader = makeRendererLoader(ctx, root)
 
   ctx.inject(['webServer'], (scoped: any) => {
-    const api = makeApi(root, () => service, stats, rendererLoader, syncOverride, agentsView)
+    const api = makeApi(root, () => service, stats, rendererLoader, syncOverride, agentsView, syncSessionSystem)
     scoped.effect(
       () => scoped.webServer.register({ kind: 'prefix', path: '/api/dsh-custom', handler: api }),
       'dsh-custom: api routes',
