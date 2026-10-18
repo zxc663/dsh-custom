@@ -297,6 +297,7 @@ window.__ModuleLoader__.load({
       const [msg, setMsg] = useState(null);
       const [err, setErr] = useState(null);
       const [modal, setModal] = useState(null);
+      const [newSec, setNewSec] = useState({ name: '', text: '' });
 
       const load = useCallback(async () => {
         try {
@@ -314,7 +315,7 @@ window.__ModuleLoader__.load({
       const officialText = officialSecs.map((s) => s.text).join('\n\n');
       const officialNames = officialSecs.map((s) => s.name).join('、');
 
-      const segDefs = [['discipline', '常驻核心'], ['user', '我的提示词'], ['layered', '渐进加载层'], ['system', '系统原版'], ['override', '⚠ 接管官方']];
+      const segDefs = [['discipline', '常驻核心'], ['user', '我的提示词'], ['layered', '渐进加载层'], ['system', '系统原版']];
       const save = async () => {
         try {
           if (seg === 'discipline') await api('discipline', { method: 'PUT', body: { text: draft } });
@@ -328,13 +329,15 @@ window.__ModuleLoader__.load({
         } catch (e) { setErr('保存失败：' + String((e && e.message) || e)); }
       };
 
-      const value = () => {
-        if (seg === 'discipline') return (data.discipline && data.discipline.sourceText) || '';
-        if (seg === 'user') return (data.user && data.user.text) || '';
-        if (seg === 'override' || seg === 'system') return (data.override && data.override.text) || '';
-        return '';
+      const editable = seg === 'discipline' || seg === 'user';
+      const overrideOn = !!(data.override && data.override.enabled);
+      const restoreDefault = async () => {
+        try {
+          await api('override/enable', { method: 'PUT', body: { enabled: false } });
+          await load();
+          setMsg({ title: '已恢复默认系统原版', detail: '模型重新使用官方提示词原文；②里的草稿仍保留，随时可再保存接管' });
+        } catch (e) { setErr('恢复失败：' + String((e && e.message) || e)); }
       };
-      const editable = seg === 'discipline' || seg === 'user' || seg === 'system';
 
       return h('div', null,
         h(Modal, { open: modal !== null, title: modal ? modal.title : '', onClose: () => setModal(null), actions: modal ? modal.actions : null }, modal ? modal.body : null),
@@ -344,30 +347,22 @@ window.__ModuleLoader__.load({
           h('div', { className: 'dshc_segs' },
             segDefs.map(([k, label]) => h('button', { key: k, 'data-active': seg === k, onClick: () => setSeg(k) }, label))),
           h('div', { className: 'dshc_body' },
-            seg === 'override'
+            seg === 'system'
               ? h('div', null,
-                h('div', { className: 'dshc_err' }, h('span', null, '⚠ 接管后官方提示词被整段替换；与其它 complete 插件互斥；启用前自动快照。')),
+                h('div', { className: 'dshc_hint', style: { marginBottom: 6 } }, '当前状态：' + (overrideOn ? '已接管——模型看到的是你在②保存的文本；点「恢复默认系统原版」可改回官方原文。' : '未接管——模型看到的是①官方原文。')),
+                h('div', { className: 'dshc_hint', style: { marginBottom: 6 } }, '① 宿主官方提示词原文（来自实际装配，只读' + (officialSecs.length ? '；' + officialSecs.length + ' 段：' + officialNames : '；装配暂无官方面') + '）'),
+                h('textarea', { className: 'dshc_ta', readOnly: true, value: officialText || (overrideOn ? '（已接管：官方原文被整段替换，装配里不再包含它）' : '（装配暂无官方面内容）'), style: { minHeight: 120, marginBottom: 10 } }),
+                h('div', { className: 'dshc_hint', style: { marginBottom: 6 } }, '② 接管草稿（「保存修改」＝用下面文本整段替换官方提示词；留空保存＝回到官方原文）'),
+                h('textarea', { className: 'dshc_ta', value: draft, onChange: (e) => setDraft(e.target.value), placeholder: '未接管——此处为空时官方原文生效；写内容保存即接管' }),
                 h('div', { className: 'dshc_row' },
-                  h('button', { className: 'dshc_btn', 'data-danger': true, onClick: () => setModal({
-                    title: '启用「接管官方」？',
-                    body: h('div', null, h('p', null, '⚠ 将整段替换官方系统提示词（complete 段）。'), h('p', null, '影响：模型只看到你写的接管文本；与其它 complete 插件互斥。'), h('p', null, '启用前已自动快照，可随时回滚恢复。')),
-                    actions: h('div', { className: 'dshc_row' },
-                      h('button', { className: 'dshc_btn', 'data-danger': true, onClick: async () => { setModal(null); try { await api('override/enable', { method: 'PUT', body: { enabled: true } }); await load(); setMsg({ title: '已启用', detail: '接管官方已启用；快照已生成。' }); } catch (e) { setErr('启用失败：' + String((e && e.message) || e)); } } }, '确认启用'),
-                      h('button', { className: 'dshc_btn', onClick: () => setModal(null) }, '取消')),
-                  }) }, data.override && data.override.enabled ? '已启用（点击停用）' : '启用接管')))
-              : seg === 'system'
-                ? h('div', null,
-                  h('div', { className: 'dshc_hint', style: { marginBottom: 6 } }, '① 宿主官方提示词原文（来自实际装配，只读' + (officialSecs.length ? '；' + officialSecs.length + ' 段：' + officialNames : '；装配暂无官方面') + '）'),
-                  h('textarea', { className: 'dshc_ta', readOnly: true, value: officialText || '（装配暂无官方面内容）', style: { minHeight: 120, marginBottom: 10 } }),
-                  h('div', { className: 'dshc_hint', style: { marginBottom: 6 } }, '② 接管草稿（保存＝用下面文本整段替换官方提示词；空＝未接管，上方原文继续生效）'),
-                  h('textarea', { className: 'dshc_ta', value: draft, onChange: (e) => setDraft(e.target.value), placeholder: '未接管——此处为空时官方原文生效；写内容保存即接管' }),
-                  h('div', { className: 'dshc_row' }, h('button', { className: 'dshc_btn', 'data-primary': true, onClick: () => setModal({
+                  h('button', { className: 'dshc_btn', 'data-primary': true, onClick: () => setModal({
                     title: '保存系统原版修改？',
                     body: h('div', null, h('p', null, '⚠ 修改系统原版=接管官方（complete 整段替换）。'), h('p', null, '保存前自动快照。')),
                     actions: h('div', { className: 'dshc_row' },
                       h('button', { className: 'dshc_btn', 'data-danger': true, onClick: async () => { setModal(null); try { await api('override', { method: 'PUT', body: { text: draft } }); await api('override/enable', { method: 'PUT', body: { enabled: true } }); await load(); setMsg({ title: '已保存', detail: '系统原版已被接管；快照已生成。' }); } catch (e) { setErr('保存失败：' + String((e && e.message) || e)); } } }, '确认接管并保存'),
                       h('button', { className: 'dshc_btn', onClick: () => setModal(null) }, '取消')),
-                  }) }, '保存修改')))
+                  }) }, '保存修改'),
+                  h('button', { className: 'dshc_btn', disabled: !overrideOn, title: overrideOn ? '让模型改回使用官方原文' : '当前未接管，无需恢复', onClick: () => void restoreDefault() }, '恢复默认系统原版')))
                 : seg === 'layered'
                   ? h('div', null,
                     h('div', { className: 'dshc_hint', style: { marginBottom: 6 } }, '按需加载的流程细则：平时不占提示词，任务触发对应场景时才临时注入、用完即走（省上下文）。可停用、恢复出厂、编辑内容，或新增自己的分节。'),
@@ -375,7 +370,7 @@ window.__ModuleLoader__.load({
                       h('button', { className: 'dshc_btn', 'data-primary': true, onClick: () => setModal({
                         title: '新增自定义分节',
                         body: h('div', null,
-                          h('p', null, '分节名（英文/数字/连字符，自动补 .md；例如 my-workflow）：'),
+                          h('p', null, '分节名（中英文/数字/连字符，自动补 .md；例如 my-workflow 或 我的流程）：'),
                           h('input', { className: 'dshc_input', value: newSec.name, onChange: (e) => setNewSec({ ...newSec, name: e.target.value }) }),
                           h('p', null, '内容（该场景被触发时注入给模型的细则）：'),
                           h('textarea', { className: 'dshc_ta', value: newSec.text, onChange: (e) => setNewSec({ ...newSec, text: e.target.value }) })),
@@ -408,7 +403,7 @@ window.__ModuleLoader__.load({
                               h('button', { className: 'dshc_btn', onClick: () => setModal(null) }, '取消')),
                           }); } catch (e) { setMsg({ title: '读取失败', detail: String((e && e.message) || e) }); }
                         } }, '内容'),
-                        s.modified ? h('button', { className: 'dshc_btn', onClick: async () => {
+                        s.modified && factorySet.has(s.name) ? h('button', { className: 'dshc_btn', onClick: async () => {
                           try { await api('layered/' + encodeURIComponent(s.name) + '/reset', { method: 'POST' }); await load(); setMsg({ title: '已恢复出厂原文', detail: s.name }); } catch (e) { setMsg({ title: '恢复失败', detail: String((e && e.message) || e) }); }
                         } }, '恢复出厂') : null,
                         h('button', { className: 'dshc_btn', onClick: async () => {
@@ -612,6 +607,7 @@ window.__ModuleLoader__.load({
       const [busy, setBusy] = useState(false);
       const [msg, setMsg] = useState(null);
       const [newRule, setNewRule] = useState({ pattern: '', note: '' });
+      const [modal, setModal] = useState(null);
       const load = useCallback(async () => {
         try { setGov(await api('governance')); setLoadErr(null); } catch (e) { setLoadErr(String((e && e.message) || e)); }
       }, []);
@@ -631,7 +627,7 @@ window.__ModuleLoader__.load({
       const addAllow = async () => {
         if (busy) return;
         setBusy(true);
-        try { await api('governance/allowlist', { method: 'POST', body: newRule }); setNewRule({ pattern: '', note: '' }); await load(); setMsg({ title: '白名单已添加', detail: '命中该形态的命令将直接放行，不再弹审批卡' }); }
+        try { await api('governance/allowlist', { method: 'POST', body: newRule }); setNewRule({ pattern: '', note: '' }); setModal(null); await load(); setMsg({ title: '白名单已添加', detail: '命中该形态的命令将直接放行，不再弹审批卡' }); }
         catch (e) { setMsg({ title: '添加失败', detail: String((e && e.message) || e) }); }
         finally { setBusy(false); }
       };
@@ -643,11 +639,11 @@ window.__ModuleLoader__.load({
         finally { setBusy(false); }
       };
       const header = h('div', { className: 'dshc_ph' }, h('h3', null, '治理开关'), h('span', { className: 'dshc_spacer' }),
-        h('span', { className: 'dshc_hint' }, busy ? '保存中…' : '保存即热生效'),
-        h('button', { className: 'dshc_btn', disabled: busy, onClick: () => void load() }, '刷新'));
+        h('span', { className: 'dshc_hint' }, busy ? '保存中…' : '开关点按即保存（热生效）'),
+        h('button', { className: 'dshc_btn', disabled: busy, title: '重新读取当前配置（修改在点开关时就已保存）', onClick: () => void load() }, '重新读取'));
       if (gov === null) {
         return h('div', { className: 'dshc_panel' }, header,
-          loadErr ? h('div', { className: 'dshc_banner' }, '读取失败：' + loadErr + '（可点「刷新」重试）') : h('div', { className: 'dshc_empty' }, '读取中…'));
+          loadErr ? h('div', { className: 'dshc_banner' }, '读取失败：' + loadErr + '（可点「重新读取」重试）') : h('div', { className: 'dshc_empty' }, '读取中…'));
       }
       const toggleDomain = (d) => {
         const next = new Set(gov.domainsOff);
@@ -655,6 +651,7 @@ window.__ModuleLoader__.load({
         void put({ l3: { domainsOff: [...next] } }, d.off ? '域已启用：' + d.domain : '域已关闭：' + d.domain);
       };
       return h('div', null,
+        h(Modal, { open: modal !== null, title: modal ? modal.title : '', onClose: () => setModal(null), actions: modal ? modal.actions : null }, modal ? modal.body : null),
         h('div', { className: 'dshc_panel' },
           header,
           gov.l3Enabled === false ? h('div', { className: 'dshc_banner' }, '⚠ L3 拦截已关闭：命中仅记录不弹卡，防线只剩宿主沙箱与提示词文本。') : null,
@@ -667,19 +664,27 @@ window.__ModuleLoader__.load({
           h('div', { className: 'dshc_grid2c' },
             gov.domains.map((d) => h('div', { key: d.domain, className: 'dshc_trow' },
               h('div', { className: 'dshc_tlabel' }, d.domain, d.noExempt ? h('span', { className: 'dshc_tag' }, '不可豁免') : null),
-              h(Switch, { checked: !d.off, disabled: d.noExempt, busy, onToggle: () => toggleDomain(d) }))))),
+              h(Switch, { checked: !d.off, disabled: d.noExempt, busy, onToggle: () => toggleDomain(d) })))),
+          h('div', { className: 'dshc_hint', style: { padding: '4px 14px 10px' } }, '「不可豁免」的域（编码执行/解码执行）固定拦截——两个最高危入口，防误关双保险，不提供关闭开关；其余域可随时关。')),
         h('div', { className: 'dshc_panel' },
-          h('div', { className: 'dshc_ph' }, h('h3', null, '误拦白名单'), h('span', { className: 'dshc_hint' }, '命中白名单形态的命令直接放行，不再弹审批卡')),
+          h('div', { className: 'dshc_ph' }, h('h3', null, '误拦白名单'), h('span', { className: 'dshc_hint' }, '命中白名单形态的命令直接放行，不再弹审批卡'), h('span', { className: 'dshc_spacer' }),
+            h('button', { className: 'dshc_btn', disabled: busy, onClick: () => setModal({
+              title: '添加误拦白名单',
+              body: h('div', null,
+                h('p', null, '命令形态（子串＋词边界，最短 4 字符，如 docker ps）：'),
+                h('input', { className: 'dshc_input', style: { width: '100%', boxSizing: 'border-box' }, value: newRule.pattern, onChange: (e) => setNewRule({ ...newRule, pattern: e.target.value }) }),
+                h('p', null, '备注（为什么放行）：'),
+                h('input', { className: 'dshc_input', style: { width: '100%', boxSizing: 'border-box' }, value: newRule.note, onChange: (e) => setNewRule({ ...newRule, note: e.target.value }) })),
+              actions: h('div', { className: 'dshc_row' },
+                h('button', { className: 'dshc_btn', 'data-primary': true, disabled: busy, onClick: () => void addAllow() }, '添加'),
+                h('button', { className: 'dshc_btn', onClick: () => setModal(null) }, '取消')),
+            }) }, '＋ 添加')),
           h('div', { className: 'dshc_allow' },
             gov.allowlist.length === 0 ? h('div', { className: 'dshc_empty' }, '暂无条目——审批卡误拦时，把该命令形态加到这里')
               : gov.allowlist.map((e) => h('div', { key: e.pattern, className: 'dshc_barrow2' },
                 h('code', null, e.pattern),
                 h('span', { className: 'dshc_hint' }, e.note || ''),
                 h('button', { className: 'dshc_btn', disabled: busy, onClick: () => void delAllow(e.pattern) }, '移除'))),
-            h('div', { className: 'dshc_row' },
-              h('input', { className: 'dshc_input', placeholder: '命令形态（如 docker ps；子串＋词边界，最短 4 字符）', value: newRule.pattern, onChange: (e) => setNewRule({ ...newRule, pattern: e.target.value }) }),
-              h('input', { className: 'dshc_input', placeholder: '备注（为什么放行）', value: newRule.note, onChange: (e) => setNewRule({ ...newRule, note: e.target.value }) }),
-              h('button', { className: 'dshc_btn', disabled: busy, onClick: () => void addAllow() }, '添加')),
             h('div', { className: 'dshc_hint' }, '提示：可先在「统计数据 → 审计时间线」核对误拦记录，再按命令形态加白名单。'))),
         h('div', { className: 'dshc_panel' },
           h('div', { className: 'dshc_ph' }, h('h3', null, '工作流能力开关')),

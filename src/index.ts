@@ -424,8 +424,8 @@ function writeLayeredState(root: string, st: Record<string, boolean>): void {
 
 function safeLayeredName(name: string): string | null {
   const n = String(name ?? '').trim()
-  if (!/^[A-Za-z0-9._\-]+\.md$/.test(n)) return null
   if (n.startsWith('.') || n.includes('..')) return null // 防路径穿越与隐藏文件
+  if (!/^[^\u0000-\u001f\\/:*?"<>|]+\.md$/.test(n)) return null // 允许中文名；拦分隔符/控制字符/保留字符（含 NTFS ADS）
   return n
 }
 
@@ -480,7 +480,7 @@ export function deleteLayeredSection(root: string, name: string): { ok: boolean;
 
 export function saveLayeredSection(root: string, name: string, text: string): LayeredSectionView | null {
   const n = safeLayeredName(name)
-  if (n === null) throw new Error(`分节名不合法（不在出厂清单）：${String(name)}`)
+  if (n === null) throw new Error(`分节名不合法（不可含路径分隔符/非法字符）：${String(name)}`)
   snapshot(root, 'save-layered')
   mkdirSync(join(root, 'layered'), { recursive: true })
   writeFileSync(join(root, 'layered', n), text, 'utf8')
@@ -1756,7 +1756,7 @@ export function makeApi(
         const secName = decodeURIComponent(mSec[1])
         if (method === 'GET') {
           const v = readLayeredSection(root, secName)
-          if (v === null) jsonResponse(res, 404, { ok: false, error: '分节不存在（不在出厂清单）' })
+          if (v === null) jsonResponse(res, 404, { ok: false, error: '分节不存在' })
           else jsonResponse(res, 200, { ok: true, value: v })
           return
         }
@@ -1764,9 +1764,15 @@ export function makeApi(
           handlePut(req, res, (body) => {
             if (typeof body.text !== 'string') throw new Error('text 必须是字符串')
             const v = saveLayeredSection(root, secName, body.text)
-            if (v === null) throw new Error('分节不存在（不在出厂清单）')
+            if (v === null) throw new Error('分节不存在')
             return v
           })
+          return
+        }
+        if (method === 'DELETE') {
+          const r = deleteLayeredSection(root, secName)
+          if (!r.ok) { jsonResponse(res, 403, { ok: false, error: r.error }); return }
+          jsonResponse(res, 200, { ok: true, value: { deleted: true } })
           return
         }
         jsonResponse(res, 405, { ok: false, error: 'method not allowed' })
@@ -1777,16 +1783,9 @@ export function makeApi(
         handlePut(req, res, (body) => {
           const secName = decodeURIComponent(mAct[1])
           const v = mAct[2] === 'reset' ? resetLayeredSection(root, secName) : toggleLayeredSection(root, secName, body.enabled !== false)
-          if (v === null) throw new Error('分节不存在（不在出厂清单）')
+          if (v === null) throw new Error('分节不存在')
           return v
         })
-        return
-      }
-      const mDel = pathname.match(/^\/api\/dsh-custom\/layered\/([^/]+)$/)
-      if (mDel !== null && method === 'DELETE') {
-        const r = deleteLayeredSection(root, decodeURIComponent(mDel[1]))
-        if (!r.ok) { jsonResponse(res, 403, { ok: false, error: r.error }); return }
-        jsonResponse(res, 200, { ok: true, value: { deleted: true } })
         return
       }
     }

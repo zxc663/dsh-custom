@@ -13,6 +13,7 @@ import {
   saveLayeredSection,
   resetLayeredSection,
   toggleLayeredSection,
+  deleteLayeredSection,
   makeApi,
 } from '../src/index.ts'
 
@@ -73,10 +74,26 @@ try {
   toggleLayeredSection(root, 'goal-mode.md', true)
   t('layered: 重新启用', true, listLayered(root).sections.find((s) => s.name === 'goal-mode.md').enabled)
 
-  // 越权路径防护（分节名只允许白名单内的出厂名）
+  // 越权路径防护（分节名只允许安全字符）
   let refused = false
   try { saveLayeredSection(root, '../../evil.md', '# x') } catch { refused = true }
   t('layered: 越权分节名拒绝', true, refused)
+  refused = false
+  try { saveLayeredSection(root, 'a\\b.md', '# x') } catch { refused = true }
+  t('layered: 反斜杠分节名拒绝', true, refused)
+
+  // 中文出厂名（00-加载清单.md）：此前受 ASCII 白名单所限读不到（「内容」弹窗 404 无反应）——回归
+  const cnSec = readLayeredSection(root, '00-加载清单.md')
+  t('layered: 中文出厂名可读', true, cnSec !== null && cnSec.text.length > 0)
+
+  // 自建分节（中文名亦可）：保存→列出→读回→删除；出厂分节不可删
+  saveLayeredSection(root, '我的测试流程.md', '# 自建内容')
+  const custom = listLayered(root).sections.find((s) => s.name === '我的测试流程.md')
+  t('layered: 自建中文名分节入库并可见', true, !!custom && custom.modified === true && custom.force === 'X')
+  t('layered: 自建分节读回文本', '# 自建内容', readLayeredSection(root, '我的测试流程.md').text)
+  deleteLayeredSection(root, '我的测试流程.md')
+  t('layered: 自建分节删除后不再列出', undefined, listLayered(root).sections.find((s) => s.name === '我的测试流程.md'))
+  t('layered: 出厂分节不可删', false, deleteLayeredSection(root, 'goal-mode.md').ok)
 
   // ── API 面（user-prompt + layered）──
   const api = makeApi(root, () => null, { hits: 0, denials: 0 })
@@ -101,6 +118,14 @@ try {
   t('api: POST toggle ok', true, r7.body.ok && r7.body.value.enabled === false)
   const r8 = await call('GET', '/api/dsh-custom/layered/..%2Fevil.md')
   t('api: 越权分节名 404/拒绝', true, !r8.body.ok)
+  const r9 = await call('GET', '/api/dsh-custom/layered/' + encodeURIComponent('00-加载清单.md'))
+  t('api: 中文出厂名 GET ok（内容弹窗数据源）', true, r9.body.ok && r9.body.value.name === '00-加载清单.md')
+  const r10 = await call('PUT', '/api/dsh-custom/layered/' + encodeURIComponent('临时自建.md'), { text: '# 临时' })
+  t('api: 中文自建名 PUT 新增 ok', true, r10.body.ok && r10.body.value.name === '临时自建.md')
+  const r11 = await call('DELETE', '/api/dsh-custom/layered/' + encodeURIComponent('临时自建.md'))
+  t('api: 自建分节 DELETE ok', true, r11.body.ok && r11.body.value.deleted === true)
+  const r12 = await call('GET', '/api/dsh-custom/layered/' + encodeURIComponent('临时自建.md'))
+  t('api: 删除后 GET 404', true, !r12.body.ok)
 } finally {
   rmSync(root, { recursive: true, force: true })
 }
