@@ -1162,6 +1162,10 @@ window.__ModuleLoader__.load({
         h(Modal, { open: modal !== null, title: modal ? modal.title : '', onClose: () => setModal(null), actions: modal ? modal.actions : null }, modal ? modal.body : null),
         h('div', { className: 'dshc_panel' },
           header,
+          h('div', { className: 'dshc_hint', style: { padding: '6px 14px 0' } },
+            gov.catalogSource === 'engine'
+              ? '域目录：来自运行时引擎上报（单一真源，引擎启动时更新）'
+              : '域目录：内置镜像副本（引擎未上报目录；可能滞后于规则变更）'),
           gov.l3Enabled === false ? h('div', { className: 'dshc_banner' }, '⚠ L3 拦截已关闭：命中仅记录不弹卡，防线只剩宿主沙箱与提示词文本。') : null,
           h('div', { className: 'dshc_trow' },
             h('div', null,
@@ -1219,8 +1223,9 @@ window.__ModuleLoader__.load({
             h(Switch, { checked: gov.compactionSignal, busy, label: '压缩重载信号', onToggle: (v) => void put({ compactionSignal: v }, v ? '压缩信号已开启' : '压缩信号已关闭') })),
           h('div', { className: 'dshc_trow' },
             h('div', null,
-              h('div', { className: 'dshc_tlabel' }, '收口即终结（不推荐）'),
-              h('div', { className: 'dshc_hint' }, 'gate 通过后立即结束回合——仅排障用；改动需重启 DSH 生效'),
+              h('div', { className: 'dshc_tlabel' }, '收口即终结（不推荐）',
+                (gov.boot && gov.concludeOnPass !== gov.boot.concludeOnPass) ? h('span', { className: 'dshc_tag' }, '待重启') : null),
+              h('div', { className: 'dshc_hint' }, 'gate 通过后立即结束回合——仅排障用；改动需重启 DSH 生效（引擎在启动时读取此开关）'),
               gov.concludeOnPass ? h('div', { className: 'dshc_er' }, '开启后交付文本可能被吞、到不了用户') : null),
             h(Switch, { checked: gov.concludeOnPass, busy, label: '收口即终结', onToggle: (v) => void put({ concludeOnPass: v }, '已保存（重启 DSH 后生效）') }))),
         h(Toast, { msg }));

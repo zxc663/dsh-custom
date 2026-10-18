@@ -697,7 +697,8 @@ export function saveSettings(root: string, patch: { injectEnabled?: unknown; ove
 // 白名单条目=归一化字面子串＋词边界（与运行时拒绝指纹同语义），最短 4 字符。
 export const GOVERNANCE_VERSION = 1
 const GOV_ALLOW_MIN_LEN = 4
-// 域目录（镜像副本：真源=dsh-plugin-dev content/rules.json l3Domains；rules 变更须同批同步）
+// 域目录（C6，2026-10-19：单一真源管道）——运行时引擎启动时把「有效域目录」写到同目录 l3-catalog.json；
+// 本页优先读它（source='engine'），缺失/坏档才回退下方镜像副本（source='mirror'，可能滞后于规则变更）。
 const L3_DOMAIN_CATALOG: Array<{ domain: string; noExempt: boolean }> = [
   { domain: '编码执行', noExempt: true },
   { domain: '解码执行', noExempt: true },
@@ -710,6 +711,21 @@ const L3_DOMAIN_CATALOG: Array<{ domain: string; noExempt: boolean }> = [
   { domain: '系统迁移/覆盖', noExempt: false },
   { domain: '破坏性远端操作', noExempt: false },
 ]
+export function readL3Catalog(root: string): { domains: Array<{ domain: string; noExempt: boolean }>; source: 'engine' | 'mirror' } {
+  try {
+    const f = readCachedFile(join(root, 'l3-catalog.json'))
+    if (f !== null) {
+      const j = JSON.parse(f.text) as { version?: unknown; domains?: unknown }
+      if (j !== null && typeof j === 'object' && j.version === 1 && Array.isArray(j.domains)) {
+        const domains = (j.domains as Array<Record<string, unknown>>)
+          .filter((d) => d !== null && typeof d === 'object' && typeof d.domain === 'string' && (d.domain as string).length > 0)
+          .map((d) => ({ domain: d.domain as string, noExempt: d.noExempt === true }))
+        if (domains.length > 0) return { domains, source: 'engine' }
+      }
+    }
+  } catch { /* 坏档=回退镜像（fail-safe，不阻断页面） */ }
+  return { domains: L3_DOMAIN_CATALOG, source: 'mirror' }
+}
 
 export interface GovernanceView {
   version: number
@@ -720,6 +736,7 @@ export interface GovernanceView {
   compactionSignal: boolean
   concludeOnPass: boolean
   domains: Array<{ domain: string; noExempt: boolean; off: boolean }>
+  catalogSource: 'engine' | 'mirror'
 }
 
 function readGovernanceRaw(root: string): Record<string, unknown> {
@@ -738,7 +755,8 @@ function writeGovernanceRaw(root: string, raw: Record<string, unknown>): void {
 export function readGovernance(root: string): GovernanceView {
   const raw = readGovernanceRaw(root)
   const l3 = (raw.l3 ?? {}) as { enabled?: unknown; domainsOff?: unknown; allowlist?: unknown }
-  const noExemptSet = new Set(L3_DOMAIN_CATALOG.filter((d) => d.noExempt).map((d) => d.domain))
+  const catalog = readL3Catalog(root)
+  const noExemptSet = new Set(catalog.domains.filter((d) => d.noExempt).map((d) => d.domain))
   const domainsOff = Array.isArray(l3.domainsOff)
     ? (l3.domainsOff as unknown[]).filter((d): d is string => typeof d === 'string' && !noExemptSet.has(d))
     : []
@@ -755,7 +773,8 @@ export function readGovernance(root: string): GovernanceView {
     levelChecklist: raw.levelChecklist !== false,
     compactionSignal: raw.compactionSignal !== false,
     concludeOnPass: raw.concludeOnPass === true,
-    domains: L3_DOMAIN_CATALOG.map((d) => ({ ...d, off: domainsOff.includes(d.domain) })),
+    domains: catalog.domains.map((d) => ({ ...d, off: domainsOff.includes(d.domain) })),
+    catalogSource: catalog.source,
   }
 }
 
@@ -766,8 +785,9 @@ function governanceNormalized(pattern: string): string {
 }
 
 export function saveGovernance(root: string, patch: Record<string, unknown>): GovernanceSaveResult {
-  const noExemptSet = new Set(L3_DOMAIN_CATALOG.filter((d) => d.noExempt).map((d) => d.domain))
-  const knownDomains = new Set(L3_DOMAIN_CATALOG.map((d) => d.domain))
+  const catalog = readL3Catalog(root)
+  const noExemptSet = new Set(catalog.domains.filter((d) => d.noExempt).map((d) => d.domain))
+  const knownDomains = new Set(catalog.domains.map((d) => d.domain))
   const cur = readGovernanceRaw(root)
   const l3 = { ...((cur.l3 ?? {}) as Record<string, unknown>) }
   if (patch.l3 !== undefined) {
@@ -1130,8 +1150,15 @@ const SESSION_SEGMENTS = ['discipline', 'user', 'layered', 'system'] as const
 export type SessionSegment = (typeof SESSION_SEGMENTS)[number]
 
 export function sessionDir(root: string, id: string): string {
-  const safe = String(id ?? '').replace(/[^A-Za-z0-9_-]/g, '')
+  const raw = String(id ?? '')
+  const safe = raw.replace(/[^A-Za-z0-9_-]/g, '')
   if (!safe) throw new Error('非法会话 id')
+  // P1-7：非规范 id（含会被净化的字符）目录名加「原始 id 短哈希」后缀，防 `a/b` 与 `ab` 归一撞车。
+  // 规范 id（session-<uuid> 等纯 [A-Za-z0-9_-]）目录名不变 ⇒ 存量数据零迁移（本机实测无存量非规范目录）。
+  if (safe !== raw) {
+    const h = createHash('sha256').update(raw).digest('hex').slice(0, 8)
+    return join(root, 'sessions', `${safe}-x${h}`)
+  }
   return join(root, 'sessions', safe)
 }
 
@@ -1758,6 +1785,7 @@ export function makeApi(
   onAccess?: () => void,
   agentsView?: AgentsView,
   onSessionChanged?: (id: string) => void,
+  bootState?: { concludeOnPass: boolean | null } | null,
 ): (req: any, res: any) => void {
   const handlePut = (req: any, res: any, run: (body: Record<string, unknown>) => unknown): void => {
     readJsonBody(req)
@@ -2080,7 +2108,7 @@ export function makeApi(
     }
     if (pathname === '/api/dsh-custom/governance') {
       if (method === 'GET') {
-        jsonResponse(res, 200, { ok: true, value: readGovernance(root) })
+        jsonResponse(res, 200, { ok: true, value: { ...readGovernance(root), boot: bootState ?? null } })
         return
       }
       if (method === 'PUT') {
@@ -2328,6 +2356,10 @@ export function makeApi(
 export function apply(ctx: any): () => void {
   const root = storageRoot()
   const info = ensureStorage(root)
+  // C7（2026-10-19）：concludeOnPass 是引擎「注册面 boot 快照」——本插件与引擎同批启动，此处记录文件值；
+  // 页面用「当前值 ≠ 启动值」显示持久「待重启」徽标（重启后快照刷新、徽标消失）。仅供提示，不参与判定。
+  const bootState: { concludeOnPass: boolean | null } = { concludeOnPass: null }
+  try { bootState.concludeOnPass = readGovernance(root).concludeOnPass } catch { /* 读取失败=不显示徽标 */ }
   const changes = detectExternalChanges(root)
   const stats: GuardStats = { denied: 0, touched: 0 }
   audit(root, { kind: 'boot', created: info.created.length, externalChanges: changes.length })
@@ -2575,7 +2607,7 @@ export function apply(ctx: any): () => void {
   const rendererLoader = makeRendererLoader(ctx, root)
 
   ctx.inject(['webServer'], (scoped: any) => {
-    const api = makeApi(root, () => service, stats, rendererLoader, syncOverride, agentsView, syncSessionSystem)
+    const api = makeApi(root, () => service, stats, rendererLoader, syncOverride, agentsView, syncSessionSystem, bootState)
     scoped.effect(
       () => scoped.webServer.register({ kind: 'prefix', path: '/api/dsh-custom', handler: api }),
       'dsh-custom: api routes',

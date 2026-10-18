@@ -29,7 +29,7 @@ import {
 } from '../src/index.ts'
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, unlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join, resolve, sep } from 'node:path'
+import { dirname, basename, join, resolve, sep } from 'node:path'
 
 let pass = 0
 let fail = 0
@@ -121,11 +121,13 @@ try {
   // 只读求值不得创建 sessions/（否则等于凭空造目录）
   t('A 只读求值不创建 sessions/ 目录', false, existsSync(join(root, 'sessions')))
 
-  // 归一化真实语义（safeId 只留 [A-Za-z0-9_-]，不是「拒绝」而是「抹除」）
-  t('A 归一: a/b → ab', join(root, 'sessions', 'ab'), sessionDir(root, 'a/b'))
-  t('A 归一: ../evil → evil', join(root, 'sessions', 'evil'), sessionDir(root, '../evil'))
-  t('A 归一: ../../x → x', join(root, 'sessions', 'x'), sessionDir(root, '../../x'))
-  t('A 归一: 数字 id → 字符串化', join(root, 'sessions', '123'), sessionDir(root, 123))
+  // 归一化真实语义（P1-7 硬化 2026-10-19：非规范 id = 净名 + `-x` 短哈希；规范 id 目录名不变）
+  const abDir = sessionDir(root, 'a/b')
+  t('A 归一: a/b → ab-x<hash>（免撞车硬化）', true, /^ab-x[0-9a-f]{8}$/.test(basename(abDir)))
+  t('A 归一: a/b 与 ab 已不同目录（撞车消除）', true, abDir !== sessionDir(root, 'ab'))
+  t('A 归一: ../evil → evil-x<hash>', true, /^evil-x[0-9a-f]{8}$/.test(basename(sessionDir(root, '../evil'))))
+  t('A 归一: ../../x → x-x<hash>', true, /^x-x[0-9a-f]{8}$/.test(basename(sessionDir(root, '../../x'))))
+  t('A 归一: 数字 id → 字符串化（规范形目录名不变）', join(root, 'sessions', '123'), sessionDir(root, 123))
   let threwDot = false
   let threwDotDot = false
   let threwBlank = false
@@ -151,14 +153,15 @@ try {
   }
   t('A 归一: 所有可归一 id 均落在 sessions/ 恰好一层内（无穿越）', [], escape)
 
-  // 写穿透实测：'../evil' 落在 sessions/evil，不在 root 或 root 的上级
+  // 写穿透实测：'../evil' 落在 sessions/<evil-x 哈希>，仍未逃出 sessions/ 且不污染 id="evil"
   writeSessionOverride(root, '../evil', { discipline: '穿透写入' })
-  t('A 写穿透: 落在 sessions/evil/discipline.md', true, existsSync(join(root, 'sessions', 'evil', 'discipline.md')))
+  const evilDir = sessionDir(root, '../evil')
+  t('A 写穿透: 落在 sessions/<净名-x 哈希>/discipline.md（仍在 sessions 内）', true, existsSync(join(evilDir, 'discipline.md')))
   t('A 写穿透: 未落在 root/evil', false, existsSync(join(root, 'evil')))
   t('A 写穿透: 未落在 tmpdir/evil', false, existsSync(join(dirname(root), 'evil')))
-  t('A 写穿透: 读回同样走 sessions/evil', '穿透写入', readSessionOverride(root, '../evil').discipline)
-  t('A 写穿透: 与 id="evil" 是同一目录（归一撞车，见报告 P2）', '穿透写入', readSessionOverride(root, 'evil').discipline)
-  rmSync(join(root, 'sessions', 'evil'), { recursive: true, force: true })
+  t('A 写穿透: 读回同样走专属目录', '穿透写入', readSessionOverride(root, '../evil').discipline)
+  t('A 写穿透: 与 id="evil" 不再同目录（P1-7 撞车消除）', null, readSessionOverride(root, 'evil').discipline)
+  rmSync(evilDir, { recursive: true, force: true })
 
   // ── B. 纯空白段文件 = 无覆盖 ──
   const wsId = 'session-ws'
@@ -294,7 +297,8 @@ try {
   seen.length = 0
   const p2 = await callApi(api, 'PUT', '/api/dsh-custom/sessions/a%2Fb/override', { segments: { user: 'x' } })
   t('D PUT 编码 id: 回调参数是解码后的 id', ['a/b'], seen)
-  t('D PUT 编码 id: 落盘走归一目录 ab', 'x', readSessionOverride(root2, 'ab').user)
+  t('D PUT 编码 id: 落盘走 a/b 专属目录', 'x', readSessionOverride(root2, 'a/b').user)
+  t('D PUT 编码 id: 未污染 id=ab 目录（P1-7 撞车消除）', null, readSessionOverride(root2, 'ab').user)
   t('D PUT 编码 id: 200', 200, p2.code)
 
   seen.length = 0

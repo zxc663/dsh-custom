@@ -18,7 +18,7 @@ try {
 
   // ── 0. 种子与默认视图 ──
   t('seed: governance.json 已种子', true, existsSync(govPath))
-  const api = makeApi(root, () => null, { hits: 0, denials: 0 })
+  const api = makeApi(root, () => null, { hits: 0, denials: 0 }, undefined, undefined, undefined, undefined, { concludeOnPass: false })
   const call = (method, url, body) => new Promise((resolve) => {
     const req = { method, url, on: (ev, cb) => { if (ev === 'data') setTimeout(() => cb(Buffer.from(JSON.stringify(body ?? {}))), 0); if (ev === 'end') setTimeout(() => cb(), 5) } }
     const res = { writeHead: (c) => { res._c = c }, end: (b) => resolve({ code: res._c, body: JSON.parse(String(b)) }) }
@@ -63,6 +63,11 @@ try {
   const c1 = await call('PUT', '/api/dsh-custom/governance', { concludeOnPass: true })
   t('api: concludeOnPass=true 回读', true, c1.body.value.concludeOnPass === true)
 
+  // ── 4b. C7 boot 快照（「待重启」徽标数据面）：当前值 ≠ 启动值 即徽标条件成立 ──
+  const b1 = await call('GET', '/api/dsh-custom/governance')
+  t('boot: 启动值仍在（false）', false, b1.body.value.boot?.concludeOnPass)
+  t('boot: 当前 true ≠ 启动 false（徽标条件成立）', true, b1.body.value.concludeOnPass === true && b1.body.value.boot.concludeOnPass === false)
+
   // ── 5. 审计落账 ──
   const auditText = readFileSync(join(root, 'audit.jsonl'), 'utf8')
   t('audit: governance-changed 在案', true, auditText.includes('governance-changed'))
@@ -74,6 +79,25 @@ try {
   const s1 = JSON.parse(readFileSync(join(root, 'settings.json'), 'utf8'))
   t('fix: saveSettings 不再丢 userPromptEnabled', true, s1.userPromptEnabled === true)
   t('fix: 注入开关正常更新', false, s1.injectEnabled)
+
+  // ── 7. C6 域目录单一真源：引擎上报 l3-catalog.json 优先，缺失/坏档回退镜像 ──
+  const catalogFile = join(root, 'l3-catalog.json')
+  t('catalog: 初始无上报 → mirror', 'mirror', (await call('GET', '/api/dsh-custom/governance')).body.value.catalogSource)
+  writeFileSync(catalogFile, JSON.stringify({ version: 1, generatedAt: new Date().toISOString(), source: 'rules.json', domains: [{ domain: '自定义域A', noExempt: false }, { domain: '数据删除', noExempt: false }] }), 'utf8')
+  const cat1 = await call('GET', '/api/dsh-custom/governance')
+  t('catalog: 上报在场 → engine', 'engine', cat1.body.value.catalogSource)
+  t('catalog: 域目录以上报为准', ['自定义域A', '数据删除'], cat1.body.value.domains.map((d) => d.domain))
+  const cp = await call('PUT', '/api/dsh-custom/governance', { l3: { domainsOff: ['自定义域A'] } })
+  t('catalog: 上报域可关闭（写校验同源）', 200, cp.code)
+  const badCat = await call('PUT', '/api/dsh-custom/governance', { l3: { domainsOff: ['编码执行'] } })
+  t('catalog: 上报目录外的域被拒（未知域 422）', 422, badCat.code)
+  await new Promise((r) => setTimeout(r, 20)) // 防同毫秒 mtime 缓存（D3 同族）
+  writeFileSync(catalogFile, '{坏档', 'utf8')
+  t('catalog: 坏档回退 mirror', 'mirror', (await call('GET', '/api/dsh-custom/governance')).body.value.catalogSource)
+  await new Promise((r) => setTimeout(r, 20))
+  rmSync(catalogFile, { force: true })
+  const cat2 = await call('GET', '/api/dsh-custom/governance')
+  t('catalog: 移除上报 → 回退 mirror 10 域', 10, cat2.body.value.domains.length)
 } finally {
   rmSync(root, { force: true, recursive: true })
 }

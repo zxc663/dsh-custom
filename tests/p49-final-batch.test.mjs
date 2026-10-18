@@ -9,6 +9,7 @@ import {
   mtimeOfFileOrNull,
   saveDiscipline,
   saveUserPrompt,
+  sessionDir,
   writeSessionOverride,
   readSessionOverride,
 } from '../src/index.ts'
@@ -166,6 +167,27 @@ const noopCount = (root) => {
     t('API override: save-noop 留痕', 2, noopCount(host.root))
   } finally {
     host.restore()
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════
+// 3. P1-7 免迁移硬化：非规范 id 目录名加短哈希（防 a/b 与 ab 撞车）；规范 id 目录名不变
+// ══════════════════════════════════════════════════════════════════
+{
+  const root = mkdtempSync(join(tmpdir(), 'dshc-p49-p17-'))
+  try {
+    ensureStorage(root)
+    const d1 = sessionDir(root, 'a/b')
+    const d2 = sessionDir(root, 'ab')
+    t('P1-7: a/b 与 ab 不再撞车', true, d1 !== d2)
+    t('P1-7: 同 id 确定性稳定', d1, sessionDir(root, 'a/b'))
+    t('P1-7: 非规范 id 落 -x 短哈希后缀', true, /-x[0-9a-f]{8}$/.test(d1))
+    t('P1-7: 规范 id 目录名不变（零迁移）', join(root, 'sessions', 'session-abc'), sessionDir(root, 'session-abc'))
+    writeSessionOverride(root, 'a/b', { discipline: 'X' })
+    t('P1-7: 非规范 id 读写闭环', 'X', readSessionOverride(root, 'a/b').discipline)
+    t('P1-7: 净化撞名 id 互不影响', null, readSessionOverride(root, 'ab').discipline)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
   }
 }
 
