@@ -1,15 +1,24 @@
 // 收尾批回归（P1-10 幂等）：内容未变 → 不重写、不建快照、不碰 mtime；审计留 save-noop；
 // 会话分段逐段去重（只写变化段）；API 级 PUT 重复提交同样被跳过。
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import {
   apply,
+  backupDetail,
+  deleteLayeredSection,
   ensureStorage,
+  listLayered,
   mtimeOfFileOrNull,
+  readLayeredSection,
+  restoreBackup,
   saveDiscipline,
+  saveLayeredSection,
   saveUserPrompt,
   sessionDir,
+  snapshot,
+  snapshotExport,
+  toggleLayeredSection,
   writeSessionOverride,
   readSessionOverride,
 } from '../src/index.ts'
@@ -186,6 +195,52 @@ const noopCount = (root) => {
     writeSessionOverride(root, 'a/b', { discipline: 'X' })
     t('P1-7: 非规范 id 读写闭环', 'X', readSessionOverride(root, 'a/b').discipline)
     t('P1-7: 净化撞名 id 互不影响', null, readSessionOverride(root, 'ab').discipline)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════
+// 4. 备份完整性（2026-10-19）：layered 内容与启停表随快照；恢复对称；旧格式兼容
+// ══════════════════════════════════════════════════════════════════
+{
+  const root = mkdtempSync(join(tmpdir(), 'dshc-p49-layered-backup-'))
+  try {
+    ensureStorage(root)
+    saveLayeredSection(root, 'my-sec.md', '自建v1')
+    saveLayeredSection(root, 'goal-mode.md', '改写出厂A')
+    toggleLayeredSection(root, 'goal-mode.md', false)
+    const snap = snapshot(root, 'test-layered-backup')
+    t('备份: 快照含自建分节', '自建v1', readFileSync(join(snap, 'layered', 'my-sec.md'), 'utf8'))
+    t('备份: 快照含出厂改写', '改写出厂A', readFileSync(join(snap, 'layered', 'goal-mode.md'), 'utf8'))
+    const st0 = JSON.parse(readFileSync(join(snap, 'layered-state.json'), 'utf8'))
+    t('备份: 快照含启停表且记停用', false, st0.enabled['goal-mode.md'])
+
+    // 变更：改写 → 删除 → 重新启用
+    saveLayeredSection(root, 'my-sec.md', '自建v2')
+    deleteLayeredSection(root, 'my-sec.md')
+    toggleLayeredSection(root, 'goal-mode.md', true)
+    t('变更后: 自建已删', null, readLayeredSection(root, 'my-sec.md'))
+    t('变更后: goal-mode 已启用', true, listLayered(root).sections.find((s) => s.name === 'goal-mode.md').enabled)
+
+    const rb = restoreBackup(root, basename(snap))
+    t('恢复: 自建分节回来了', '自建v1', readLayeredSection(root, 'my-sec.md')?.text)
+    t('恢复: 出厂改写回 A', '改写出厂A', readLayeredSection(root, 'goal-mode.md')?.text)
+    t('恢复: 启停表回停用', false, listLayered(root).sections.find((s) => s.name === 'goal-mode.md').enabled)
+    t('恢复: restored 含 layered 键', true, rb.restored.some((r) => r.startsWith('layered/')))
+
+    const detail = backupDetail(root, basename(snap))
+    t('详情: 列出 layered 分节', true, detail.files.some((f) => f.file === 'layered/my-sec.md'))
+    const exp = snapshotExport(root, basename(snap))
+    t('导出: 含 layered 分节内容', '自建v1', exp.files['layered/my-sec.md'])
+
+    // 旧格式兼容：手工造无 layered/ 的快照 → 恢复不炸、不动现层
+    const legacyName = '2026-01-01T00-00-00-000'
+    mkdirSync(join(root, 'backups', legacyName), { recursive: true })
+    writeFileSync(join(root, 'backups', legacyName, 'discipline.md'), '旧格式纪律', 'utf8')
+    const rb2 = restoreBackup(root, legacyName)
+    t('旧格式: 只恢复根文件', ['discipline.md'], rb2.restored)
+    t('旧格式: 现有 layered 未被动', '自建v1', readLayeredSection(root, 'my-sec.md')?.text)
   } finally {
     rmSync(root, { recursive: true, force: true })
   }

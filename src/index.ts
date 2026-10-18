@@ -113,6 +113,7 @@ const SEED_FILES: Record<string, string> = {
   'override.md': '',
   'scope.json': '{\n  "version": 1,\n  "rules": []\n}\n',
   'settings.json': '{\n  "version": 1,\n  "injectEnabled": true\n}\n',
+  'layered-state.json': '{\n  "version": 1,\n  "enabled": {}\n}\n',
   // 治理开关（P46，2026-10-18）：页面写 → 运行时插件 mtime 热读（layered-state 同款跨包管道）。
   // 刻意不加入 TRACKED（可再生态，回滚语义不覆盖它）。
   'governance.json': '{\n  "version": 1\n}\n',
@@ -120,7 +121,9 @@ const SEED_FILES: Record<string, string> = {
 
 // 2026-10-19 修复批：user-prompt.md 原漏出 TRACKED ⇒ 快照/外部改动/状态面都看不到「我的提示词」——
 // 快照跑在写 user-prompt 之前却复制不到它，回滚会丢这段。补齐。
-const TRACKED = ['discipline.md', 'user-prompt.md', 'override.md', 'scope.json', 'settings.json']
+// 2026-10-19 备份完整性批：layered-state.json（渐进层启停表）同为「改提示词状态」的一部分，纳入 TRACKED
+// （layered/ 目录内容由 snapshot() 单独复制，见该函数）。
+const TRACKED = ['discipline.md', 'user-prompt.md', 'override.md', 'scope.json', 'settings.json', 'layered-state.json']
 
 // 快照保留策略（#决策 19：保留最近 N 个自动清理，默认 20）。
 const BACKUP_KEEP = 20
@@ -245,7 +248,23 @@ export function snapshot(root: string, reason: string): string {
       copied.push(f)
     }
   }
-  audit(root, { kind: 'snapshot', reason, dir, files: copied })
+  // 2026-10-19 备份完整性批：layered/ 目录内容（用户改写/自建分节）随快照复制（平铺一层，任何扩展名全收）——
+  // 此前 layered 的 保存/恢复出厂/删除 都拍快照但快照不含实际文件 ⇒ 自建删除与出厂改写无真备份（本批闭环）。
+  const layeredCopied: string[] = []
+  try {
+    const ldir = join(root, 'layered')
+    for (const f of readdirSync(ldir)) {
+      const src = join(ldir, f)
+      try { if (!statSync(src).isFile()) continue } catch { continue }
+      mkdirSync(join(dir, 'layered'), { recursive: true })
+      copyFileSync(src, join(dir, 'layered', f))
+      layeredCopied.push(f)
+    }
+  } catch (e) {
+    const code = (e as { code?: unknown })?.code
+    if (code !== 'ENOENT') console.warn('[dsh-custom] layered 快照复制失败：', String((e as { message?: unknown })?.message ?? e))
+  }
+  audit(root, { kind: 'snapshot', reason, dir, files: copied, ...(layeredCopied.length > 0 ? { layered: layeredCopied } : {}) })
   const pruned = pruneBackupDir(join(root, 'backups'), BACKUP_KEEP)
   if (pruned.length > 0) audit(root, { kind: 'snapshot-pruned', removed: pruned, keep: BACKUP_KEEP })
   return dir
@@ -467,6 +486,7 @@ function readLayeredState(root: string): Record<string, boolean> {
 function writeLayeredState(root: string, st: Record<string, boolean>): void {
   writeFileSync(join(root, 'layered-state.json'), JSON.stringify({ version: 1, enabled: st }, null, 2) + '\n', 'utf8')
   forgetCachedFile(join(root, 'layered-state.json'))
+  recordHashes(root, ['layered-state.json']) // 入 TRACKED 后：本插件写入须登记哈希，防 external-change 误报
 }
 
 function safeLayeredName(name: string): string | null {
@@ -926,7 +946,7 @@ export function listBackups(root: string): BackupEntry[] {
     .map((name) => {
       let files: string[] = []
       try {
-        files = readdirSync(join(b, name))
+        files = readdirSync(join(b, name), { withFileTypes: true }).filter((d) => d.isFile()).map((d) => d.name)
       } catch (e) {
         console.warn(`[dsh-custom] 快照 ${name} 读取失败：`, String((e as { message?: unknown })?.message ?? e))
       }
@@ -950,13 +970,14 @@ export function backupDetail(root: string, name: string, sessionId: string | nul
   const files: BackupFileDetail[] = []
   let settings: Record<string, unknown> | null = null
   let scope: { count: number; paths: string[] } | null = null
-  for (const f of readdirSync(dir)) {
-    const p = join(dir, f)
+  for (const f of readdirSync(dir, { withFileTypes: true })) {
+    if (!f.isFile()) continue // 子目录（layered/）在下方单独展开
+    const p = join(dir, f.name)
     let text = ''
     try { text = readFileSync(p, 'utf8') } catch { continue }
-    files.push({ file: f, bytes: Buffer.byteLength(text, 'utf8'), lines: text.split('\n').filter((x) => x.trim() !== '').length, head: text.replace(/\s+/g, ' ').slice(0, 120) })
-    if (f === 'settings.json') { try { settings = JSON.parse(text) as Record<string, unknown> } catch { /* 坏档不解析 */ } }
-    if (f === 'scope.json') {
+    files.push({ file: f.name, bytes: Buffer.byteLength(text, 'utf8'), lines: text.split('\n').filter((x) => x.trim() !== '').length, head: text.replace(/\s+/g, ' ').slice(0, 120) })
+    if (f.name === 'settings.json') { try { settings = JSON.parse(text) as Record<string, unknown> } catch { /* 坏档不解析 */ } }
+    if (f.name === 'scope.json') {
       try {
         const j = JSON.parse(text) as { rules?: Array<{ path?: unknown }> }
         const rules = Array.isArray(j.rules) ? j.rules : []
@@ -964,6 +985,15 @@ export function backupDetail(root: string, name: string, sessionId: string | nul
       } catch { /* 坏档不解析 */ }
     }
   }
+  // layered/ 子目录（2026-10-19 备份完整性批）：逐文件列出（file 键=layered/<名>），让「回滚到哪」可读
+  try {
+    for (const f of readdirSync(join(dir, 'layered'), { withFileTypes: true })) {
+      if (!f.isFile()) continue
+      let text = ''
+      try { text = readFileSync(join(dir, 'layered', f.name), 'utf8') } catch { continue }
+      files.push({ file: 'layered/' + f.name, bytes: Buffer.byteLength(text, 'utf8'), lines: text.split('\n').filter((x) => x.trim() !== '').length, head: text.replace(/\s+/g, ' ').slice(0, 120) })
+    }
+  } catch { /* 旧格式快照无 layered/ —— 兼容 */ }
   return { name, files, settings, scope }
 }
 
@@ -974,7 +1004,15 @@ export function restoreBackup(root: string, name: string): { restored: string[];
   if (abs !== b && !abs.startsWith(b + sep)) throw new Error('非法快照路径（越出 backups 根）')
   if (!existsSync(abs) || abs === b) throw new Error('快照不存在')
   const files = readdirSync(abs).filter((f) => (TRACKED as string[]).includes(f))
-  if (files.length === 0) throw new Error('快照内无可恢复文件')
+  // layered/ 子目录（2026-10-19 备份完整性批）：复制快照内存在的分节文件回 layered/；
+  // 与根文件同语义（复制快照里有、不删快照后新增——非破坏式，恢复前自动再快照可反悔）；
+  // 旧格式快照无 layered/ 子目录 ⇒ 跳过（不动现层，兼容）。
+  const layeredSrc = join(abs, 'layered')
+  let layeredFiles: string[] = []
+  try {
+    layeredFiles = readdirSync(layeredSrc, { withFileTypes: true }).filter((d) => d.isFile()).map((d) => d.name)
+  } catch { /* 旧格式/无 layered —— 兼容跳过 */ }
+  if (files.length === 0 && layeredFiles.length === 0) throw new Error('快照内无可恢复文件')
   const pre = snapshot(root, 'pre-restore')
   const restored: string[] = []
   for (const f of files) {
@@ -982,7 +1020,15 @@ export function restoreBackup(root: string, name: string): { restored: string[];
     forgetCachedFile(join(root, f))
     restored.push(f)
   }
-  recordHashes(root, restored)
+  if (layeredFiles.length > 0) {
+    mkdirSync(join(root, 'layered'), { recursive: true })
+    for (const f of layeredFiles) {
+      copyFileSync(join(layeredSrc, f), join(root, 'layered', f))
+      forgetCachedFile(join(root, 'layered', f))
+      restored.push('layered/' + f)
+    }
+  }
+  recordHashes(root, files)
   audit(root, { kind: 'backup-restored', name, files: restored })
   return { restored, preRestoreSnapshot: pre }
 }
@@ -1063,6 +1109,17 @@ export function snapshotExport(root: string, name: string, sessionId: string | n
     if (total > 2 * 1024 * 1024) return null
     files[f] = text
   }
+  // layered/ 子目录（2026-10-19 备份完整性批）：分节文件以 layered/<名> 键导出（名可含中文，不做 ASCII 白名单）
+  try {
+    for (const f of readdirSync(join(dir, 'layered'), { withFileTypes: true })) {
+      if (!f.isFile() || !/\.(md|json)$/.test(f.name)) continue
+      let text = ''
+      try { text = readFileSync(join(dir, 'layered', f.name), 'utf8') } catch { continue }
+      total += Buffer.byteLength(text, 'utf8')
+      if (total > 2 * 1024 * 1024) return null
+      files['layered/' + f.name] = text
+    }
+  } catch { /* 旧格式快照无 layered/ —— 兼容 */ }
   return { name, scope: sessionId !== null && sessionId !== '' ? 'session' : 'global', sessionId, files }
 }
 
