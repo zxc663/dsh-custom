@@ -14,7 +14,7 @@ window.__ModuleLoader__.load({
     const PLUGIN_ID = 'dsh-custom';
 
     const CSS = [
-      '.dshc{width:100%;max-width:1280px;color:var(--dsw-alias-label-primary);display:flex;flex-direction:column;gap:12px;font-size:13px;line-height:20px}',
+      '.dshc{width:100%;max-width:1280px;color:var(--dsw-alias-label-primary);display:flex;flex-direction:column;gap:12px;font-size:14px;line-height:21px}',
       '.dshc_top{display:flex;align-items:center;gap:16px;padding-bottom:10px;border-bottom:1px solid var(--dsw-alias-border-l2)}',
       '.dshc_brand{font-size:16px;font-weight:700}',
       '.dshc_brand span{font-size:12px;font-weight:400;color:var(--dsw-alias-label-secondary);margin-left:8px}',
@@ -40,7 +40,7 @@ window.__ModuleLoader__.load({
       '.dshc_srow .l1{display:flex;justify-content:space-between;color:var(--dsw-alias-label-secondary);font-size:12px}',
       '.dshc_srow .l2{color:var(--dsw-alias-label-secondary);font-size:12px;margin-top:2px}',
       '.dshc_srow .l3{font-weight:600;margin-top:4px}',
-      '.dshc_pill{font-size:11px;border-radius:5px;padding:1px 6px}',
+      '.dshc_pill{font-size:12px;border-radius:5px;padding:1px 6px}',
       '.dshc_pill[data-t=ok]{color:var(--dsw-alias-state-success-primary);background:color-mix(in srgb, var(--dsw-alias-state-success-primary) 12%, transparent)}',
       '.dshc_pill[data-t=warn]{color:var(--dsw-alias-state-warn-primary);background:color-mix(in srgb, var(--dsw-alias-state-warn-primary) 12%, transparent)}',
       '.dshc_pill[data-t=err]{color:var(--dsw-alias-state-error-primary);background:color-mix(in srgb, var(--dsw-alias-state-error-primary) 12%, transparent)}',
@@ -57,11 +57,11 @@ window.__ModuleLoader__.load({
       '.dshc_actions{position:sticky;bottom:0;z-index:2;background:var(--dsw-alias-bg-layer-1);padding:8px 0;margin-top:8px;border-top:1px solid var(--dsw-alias-border-l2)}',
       '.dshc_hint{color:var(--dsw-alias-label-secondary);font-size:12px}',
       '.dshc_err{border:1px solid var(--dsw-alias-state-error-primary);border-radius:8px;padding:10px 12px;color:var(--dsw-alias-state-error-primary);margin:0 14px 12px;display:flex;gap:10px;align-items:center;flex-wrap:wrap}',
-      '.dshc_cards{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-bottom:14px}',
+      '.dshc_cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-bottom:14px}',
       '.dshc_card{border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1);border-radius:9px;padding:12px}',
       '.dshc_card .k{color:var(--dsw-alias-label-secondary);font-size:12px}',
       '.dshc_card .v{font-size:22px;font-weight:700;margin-top:6px}',
-      '.dshc_card .s{color:var(--dsw-alias-label-secondary);font-size:11px;margin-top:4px}',
+      '.dshc_card .s{color:var(--dsw-alias-label-secondary);font-size:12px;margin-top:4px}',
       '.dshc_grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}',
       '.dshc_barrow{display:grid;grid-template-columns:150px 1fr 64px;gap:10px;align-items:center;margin:9px 0}',
       '.dshc_bar{height:16px;border-radius:4px;background:var(--dsw-alias-brand-primary)}',
@@ -78,7 +78,7 @@ window.__ModuleLoader__.load({
       '.dshc_toast .m{color:var(--dsw-alias-label-secondary);font-size:12px}',
       '.dshc_empty{color:var(--dsw-alias-label-secondary);padding:20px;text-align:center}',
       '.dshc_conv{max-height:360px;overflow:auto;border:1px solid var(--dsw-alias-border-l2);border-radius:8px;padding:8px 10px;margin-top:8px;display:flex;flex-direction:column;gap:10px}',
-      '.dshc_convmsg .h{font-size:11px;color:var(--dsw-alias-label-secondary);margin-bottom:3px}',
+      '.dshc_convmsg .h{font-size:12px;color:var(--dsw-alias-label-secondary);margin-bottom:3px}',
       '.dshc_convmsg .h .t{margin-left:8px}',
       '.dshc_convmsg .b{white-space:pre-wrap;word-break:break-word;font-size:13px;line-height:19px}',
       '.dshc_convmsg[data-role=assistant] .b{color:var(--dsw-alias-label-secondary)}',
@@ -86,7 +86,7 @@ window.__ModuleLoader__.load({
       // 治理开关页（P46）
       '.dshc_trow{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:10px 14px;border-bottom:1px solid var(--dsw-alias-border-l2)}',
       '.dshc_tlabel{font-size:13px;font-weight:600}',
-      '.dshc_tag{margin-left:8px;font-size:10px;color:var(--dsw-alias-state-warn-primary);border:1px solid currentColor;border-radius:4px;padding:0 5px;white-space:nowrap}',
+      '.dshc_tag{margin-left:8px;font-size:11px;color:var(--dsw-alias-state-warn-primary);border:1px solid currentColor;border-radius:4px;padding:0 5px;white-space:nowrap}',
       '.dshc_banner{margin:0 14px 10px;padding:10px 12px;border:1px solid var(--dsw-alias-state-error-primary);border-radius:8px;color:var(--dsw-alias-state-error-primary);font-size:12px}',
       '.dshc_allow{padding:4px 14px 10px}',
       '.dshc_barrow2{display:grid;grid-template-columns:1fr 1fr 64px;gap:10px;align-items:center;padding:6px 0;border-bottom:1px solid var(--dsw-alias-border-l2);font-size:12px}',
@@ -99,7 +99,7 @@ window.__ModuleLoader__.load({
       '.dshc_switch[aria-checked="true"] .dshc_knob{left:22px}',
       '.dshc_switch[data-locked="true"]{opacity:1;cursor:not-allowed;background:var(--dsw-alias-brand-primary)}',
       '.dshc_switch[data-locked="true"] .dshc_knob{left:22px}',
-      '.dshc_lock{font-size:10px;color:var(--dsw-alias-label-secondary);border:1px solid var(--dsw-alias-border-l2);border-radius:4px;padding:0 5px;white-space:nowrap}',
+      '.dshc_lock{font-size:11px;color:var(--dsw-alias-label-secondary);border:1px solid var(--dsw-alias-border-l2);border-radius:4px;padding:0 5px;white-space:nowrap}',
       '.dshc_grid2c{display:grid;grid-template-columns:1fr 1fr;gap:0 22px}',
     ].join('\n');
     const CSS_TAG_ID = PLUGIN_ID + '/tab.css';
@@ -147,16 +147,49 @@ window.__ModuleLoader__.load({
     }
 
     // ── 弹窗 / toast / 未实现 ──
+    // P1-8 焦点陷阱：打开时记住触发点并聚焦弹窗内首个可聚焦元素；Tab/Shift+Tab 在弹窗内循环；
+    // 关闭后焦点还原触发点。effect 只在 open 切换时跑（closeRef 保持监听读到最新 onClose），
+    // 避免弹窗内输入引起重渲染时被重新聚焦（否则输入框会丢焦点）。
     function Modal(props) {
+      const boxRef = useRef(null);
+      const restoreRef = useRef(null);
+      const closeRef = useRef(props.onClose);
+      closeRef.current = props.onClose;
       useEffect(() => {
         if (!props.open) return;
-        const onKey = (e) => { if (e.key === 'Escape') props.onClose(); };
-        window.addEventListener('keydown', onKey);
-        return () => window.removeEventListener('keydown', onKey);
-      }, [props.open, props.onClose]);
+        restoreRef.current = document.activeElement;
+        const box = boxRef.current;
+        const focusables = () => {
+          if (!box) return [];
+          return Array.prototype.slice.call(box.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'))
+            .filter((el) => !el.disabled);
+        };
+        const first = focusables()[0];
+        try { (first || box).focus({ preventScroll: true }); } catch { /* 聚焦失败不阻塞弹窗 */ }
+        const onKey = (e) => {
+          if (e.key === 'Escape') { closeRef.current(); return; }
+          if (e.key !== 'Tab') return;
+          const list = focusables();
+          if (list.length === 0) return;
+          const idx = list.indexOf(document.activeElement);
+          if (e.shiftKey) {
+            if (idx <= 0) { e.preventDefault(); list[list.length - 1].focus(); }
+          } else if (idx === -1 || idx === list.length - 1) {
+            e.preventDefault(); list[0].focus();
+          }
+        };
+        window.addEventListener('keydown', onKey, true);
+        return () => {
+          window.removeEventListener('keydown', onKey, true);
+          const target = restoreRef.current;
+          if (target && typeof target.focus === 'function' && document.contains(target)) {
+            try { target.focus({ preventScroll: true }); } catch { /* 还原失败不阻塞关闭 */ }
+          }
+        };
+      }, [props.open]); // eslint-disable-line react-hooks/exhaustive-deps
       if (!props.open) return null;
       return h('div', { className: 'dshc_modalw', role: 'presentation', onClick: (e) => { if (e.target === e.currentTarget) props.onClose(); } },
-        h('div', { className: 'dshc_modal', role: 'dialog', 'aria-modal': 'true', 'aria-label': props.title || '对话框' },
+        h('div', { className: 'dshc_modal', ref: boxRef, tabIndex: -1, role: 'dialog', 'aria-modal': 'true', 'aria-label': props.title || '对话框' },
           h('h4', null, props.title),
           props.children,
           h('div', { className: 'acts' },
@@ -777,8 +810,10 @@ window.__ModuleLoader__.load({
                           h('p', null, '内容（该场景被触发时注入给模型的细则）：'),
                           h('textarea', { className: 'dshc_ta', value: newSec.text, onChange: (e) => setNewSec({ ...newSec, text: e.target.value }) })),
                         actions: h('div', { className: 'dshc_row' },
-                          h('button', { className: 'dshc_btn', 'data-primary': true, onClick: async () => {
-                            try { await api('layered/' + encodeURIComponent(newSec.name.trim().replace(/\.md$/, '') + '.md'), { method: 'PUT', body: { text: newSec.text } }); setModal(null); setNewSec({ name: '', text: '' }); await load(); setMsg({ title: '分节已新增', detail: '保存后按场景触发注入' }); } catch (e) { setMsg({ title: '新增失败', detail: String((e && e.message) || e) }); }
+                          h('button', { className: 'dshc_btn', 'data-primary': true, disabled: busy, onClick: async () => {
+                            if (busy) return;
+                            setBusy(true);
+                            try { await api('layered/' + encodeURIComponent(newSec.name.trim().replace(/\.md$/, '') + '.md'), { method: 'PUT', body: { text: newSec.text } }); setModal(null); setNewSec({ name: '', text: '' }); await load(); setMsg({ title: '分节已新增', detail: '保存后按场景触发注入' }); } catch (e) { setMsg({ title: '新增失败', detail: String((e && e.message) || e) }); } finally { setBusy(false); }
                           } }, '创建'),
                           h('button', { className: 'dshc_btn', onClick: () => setModal(null) }, '取消')),
                       }) }, '＋ 新增分节')),
@@ -792,31 +827,41 @@ window.__ModuleLoader__.load({
                           s.enabled === false ? h('span', { className: 'dshc_er' }, ' 已停用') : null),
                         h('div', { className: 'dshc_hint' }, SECTION_LABELS[s.name] ? '' : '自定义分节（' + s.chars + ' 字）')),
                       h('span', { className: 'dshc_row' },
-                        h('button', { className: 'dshc_btn', onClick: async () => {
+                        h('button', { className: 'dshc_btn', disabled: busy, onClick: async () => {
+                          if (busy) return; // P1-10 防连点
+                          setBusy(true);
                           try { const sec = await api('layered/' + encodeURIComponent(s.name)); setModal({
                             title: '编辑分节 · ' + (SECTION_LABELS[s.name] || s.name),
                             body: h('div', null,
                               h('p', null, (s.name.startsWith('00-') ? '分节路由清单：' : '该场景被触发时注入给模型的内容：') + '（' + s.chars + ' 字）'),
                               h('textarea', { className: 'dshc_ta', value: sec.text, onChange: (e) => { sec.text = e.target.value; } })),
                             actions: h('div', { className: 'dshc_row' },
-                              h('button', { className: 'dshc_btn', 'data-primary': true, onClick: async () => {
-                                try { await api('layered/' + encodeURIComponent(s.name), { method: 'PUT', body: { text: sec.text } }); setModal(null); await load(); setMsg({ title: '分节已保存', detail: s.name }); } catch (e) { setMsg({ title: '保存失败', detail: String((e && e.message) || e) }); }
+                              h('button', { className: 'dshc_btn', 'data-primary': true, disabled: busy, onClick: async () => {
+                                if (busy) return;
+                                setBusy(true);
+                                try { await api('layered/' + encodeURIComponent(s.name), { method: 'PUT', body: { text: sec.text } }); setModal(null); await load(); setMsg({ title: '分节已保存', detail: s.name }); } catch (e) { setMsg({ title: '保存失败', detail: String((e && e.message) || e) }); } finally { setBusy(false); }
                               } }, '保存'),
                               h('button', { className: 'dshc_btn', onClick: () => setModal(null) }, '取消')),
-                          }); } catch (e) { setMsg({ title: '读取失败', detail: String((e && e.message) || e) }); }
+                          }); } catch (e) { setMsg({ title: '读取失败', detail: String((e && e.message) || e) }); } finally { setBusy(false); }
                         } }, '内容'),
-                        s.modified && factorySet.has(s.name) ? h('button', { className: 'dshc_btn', onClick: async () => {
-                          try { await api('layered/' + encodeURIComponent(s.name) + '/reset', { method: 'POST' }); await load(); setMsg({ title: '已恢复出厂原文', detail: s.name }); } catch (e) { setMsg({ title: '恢复失败', detail: String((e && e.message) || e) }); }
+                        s.modified && factorySet.has(s.name) ? h('button', { className: 'dshc_btn', disabled: busy, onClick: async () => {
+                          if (busy) return;
+                          setBusy(true);
+                          try { await api('layered/' + encodeURIComponent(s.name) + '/reset', { method: 'POST' }); await load(); setMsg({ title: '已恢复出厂原文', detail: s.name }); } catch (e) { setMsg({ title: '恢复失败', detail: String((e && e.message) || e) }); } finally { setBusy(false); }
                         } }, '恢复出厂') : null,
-                        h('button', { className: 'dshc_btn', onClick: async () => {
-                          try { await api('layered/' + encodeURIComponent(s.name) + '/toggle', { method: 'POST', body: { enabled: s.enabled === false } }); await load(); setMsg({ title: s.enabled === false ? '已启用' : '已停用', detail: s.name + (s.enabled === false ? ' 将重新按场景注入' : ' 停用后模型收不到该场景细则') }); } catch (e) { setMsg({ title: '操作失败', detail: String((e && e.message) || e) }); }
+                        h('button', { className: 'dshc_btn', disabled: busy, onClick: async () => {
+                          if (busy) return;
+                          setBusy(true);
+                          try { await api('layered/' + encodeURIComponent(s.name) + '/toggle', { method: 'POST', body: { enabled: s.enabled === false } }); await load(); setMsg({ title: s.enabled === false ? '已启用' : '已停用', detail: s.name + (s.enabled === false ? ' 将重新按场景注入' : ' 停用后模型收不到该场景细则') }); } catch (e) { setMsg({ title: '操作失败', detail: String((e && e.message) || e) }); } finally { setBusy(false); }
                         } }, s.enabled === false ? '启用' : '停用'),
                         !factorySet.has(s.name) ? h('button', { className: 'dshc_btn', 'data-danger': true, onClick: () => setModal({
                           title: '删除分节 · ' + s.name + '？',
                           body: h('div', null, h('p', null, '删除后该自定义分节不再出现（模型侧无感知）。')), 
                           actions: h('div', { className: 'dshc_row' },
-                            h('button', { className: 'dshc_btn', 'data-danger': true, onClick: async () => {
-                              try { await api('layered/' + encodeURIComponent(s.name), { method: 'DELETE' }); setModal(null); await load(); setMsg({ title: '分节已删除', detail: s.name }); } catch (e) { setMsg({ title: '删除失败', detail: String((e && e.message) || e) }); }
+                            h('button', { className: 'dshc_btn', 'data-danger': true, disabled: busy, onClick: async () => {
+                              if (busy) return;
+                              setBusy(true);
+                              try { await api('layered/' + encodeURIComponent(s.name), { method: 'DELETE' }); setModal(null); await load(); setMsg({ title: '分节已删除', detail: s.name }); } catch (e) { setMsg({ title: '删除失败', detail: String((e && e.message) || e) }); } finally { setBusy(false); }
                             } }, '确认删除'),
                             h('button', { className: 'dshc_btn', onClick: () => setModal(null) }, '取消')),
                         }) }, '删除') : null)),
@@ -1001,7 +1046,7 @@ window.__ModuleLoader__.load({
       'settings-saved': '设置已保存', 'discipline-saved': '常驻核心已保存',
       'governance-changed': '治理开关已变更', 'governance-allowlist': '白名单已变更',
       'governance': '治理开关装载', 'compaction-signal': '压缩重载信号已送达',
-      'layered-inject': '按需注入流程分节',
+      'layered-inject': '按需注入流程分节', 'save-noop': '保存被跳过（内容没变）',
     };
 
     // 动作流水语义表：kind → { l: 一句话动作, e: 对你的影响 }；internal=true 的纯内部事件不上 UI
@@ -1034,6 +1079,7 @@ window.__ModuleLoader__.load({
       'governance-allowlist': { l: '白名单已变更', e: '命中该形态的命令不再弹审批卡' },
       governance: { l: '治理开关已装载', e: '按你上次保存的开关状态启动' },
       'layered-inject': { l: '按需注入了流程分节', e: '任务触发对应场景，临时注入细则' },
+      'save-noop': { l: '保存被跳过（内容没变）', e: '没有重复创建快照与写入' },
       'renderer-resolve': { l: null, internal: true },
       'render-tolerate': { l: null, internal: true },
       'compaction-signal': { l: null, internal: true },

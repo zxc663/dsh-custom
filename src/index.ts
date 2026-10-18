@@ -345,6 +345,12 @@ export function readDiscipline(root: string): DisciplineState {
 }
 
 export function saveDiscipline(root: string, text: string): DisciplineState {
+  const cur = readDiscipline(root)
+  if (cur.sourceText === text) {
+    // P1-10 幂等：内容未变不重写、不建快照（防重复提交刷快照挤掉有意义的历史）
+    audit(root, { kind: 'save-noop', target: 'discipline' })
+    return cur
+  }
   snapshot(root, 'save-discipline')
   writeFileSync(join(root, 'discipline.md'), text, 'utf8')
   forgetCachedFile(join(root, 'discipline.md'))
@@ -389,6 +395,12 @@ function readSettingsJson(root: string): { injectEnabled?: boolean; overrideEnab
 }
 
 export function saveUserPrompt(root: string, text: string, enabled = true): UserPromptState {
+  const cur = readUserPrompt(root)
+  if (cur.text === text && cur.enabled === enabled) {
+    // P1-10 幂等：内容与开关都未变→不重写、不建快照
+    audit(root, { kind: 'save-noop', target: 'user-prompt' })
+    return cur
+  }
   snapshot(root, 'save-user-prompt')
   writeFileSync(join(root, 'user-prompt.md'), text, 'utf8')
   forgetCachedFile(join(root, 'user-prompt.md'))
@@ -1153,14 +1165,27 @@ export function writeSessionOverride(
   id: string,
   segments: Record<string, string | null>,
 ): { written: string[]; snapshot: string | null } {
-  const snap = snapshotSession(root, id)
   const dir = sessionDir(root, id)
-  mkdirSync(dir, { recursive: true })
-  const written: string[] = []
+  // P1-10 幂等：逐段对比，内容相同的段不重写（不碰 mtime）；全部未变则连快照也不建
+  const changed: Array<{ seg: SessionSegment; v: string | null }> = []
   for (const seg of SESSION_SEGMENTS) {
     if (!(seg in segments)) continue
-    const p = join(dir, seg + '.md')
     const v = segments[seg]
+    let cur: string | null = null
+    try { cur = readFileSync(join(dir, seg + '.md'), 'utf8') } catch { cur = null }
+    const next = v === null || v === '' ? null : v
+    if (cur === next) continue
+    changed.push({ seg, v })
+  }
+  if (changed.length === 0) {
+    audit(root, { kind: 'save-noop', target: 'session', session: id })
+    return { written: [], snapshot: null }
+  }
+  const snap = snapshotSession(root, id)
+  mkdirSync(dir, { recursive: true })
+  const written: string[] = []
+  for (const { seg, v } of changed) {
+    const p = join(dir, seg + '.md')
     if (v === null || v === '') {
       try { unlinkSync(p) } catch { /* 已不存在 */ }
       forgetCachedFile(p)
@@ -2167,6 +2192,13 @@ export function makeApi(
             const err = validateOverrideText(body.text, (asm?.variables ?? {}) as Record<string, unknown>, render)
             if (err !== null) {
               jsonResponse(res, 422, { ok: false, error: `干跑校验未通过：${err}` })
+              return
+            }
+            if (readOverride(root).text === body.text) {
+              // P1-10 幂等：接管文本未变→不重写、不建快照（防重复提交刷快照）
+              audit(root, { kind: 'save-noop', target: 'override' })
+              access()
+              jsonResponse(res, 200, { ok: true, value: readOverride(root), skipped: true })
               return
             }
             snapshot(root, 'save-override')
