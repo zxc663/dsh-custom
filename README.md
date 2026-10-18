@@ -2,7 +2,7 @@
 
 系统提示词管理插件：**看清**每次组装实际可用的官方系统提示词、**深改**其内容（整段接管）、并把纪律文本前置到 system 层。
 
-> 当前为 **P0 ＋ P1a ＋ P1b ＋ P2 ＋ 会话/档位级实取视图**（主体能力全量交付）：存储骨架 ＋ 防静默改写护栏（拦截＋提示＋留痕）＋ HTTP 数据面＋浏览器半（设置区「DSH自定义」独立条目）＋ **纪律前置**（注入开关/编辑器/热生效/AGENTS 共存提示）＋ **作用域覆盖**（全局默认＋单工作区规则）＋ **深度自定义**（complete 整段接管：干跑校验/快照回滚/互斥探测）＋ **实际装配视图可切作用域**（全局｜任一活跃会话：真实请求同法 `assemble({agent, scope: agent})`）。
+> 当前为 **P0 ＋ P1a ＋ P1b ＋ P2 ＋ 会话/档位级实取视图 ＋ 页面批（批次三/四）**（主体能力全量交付）：存储骨架 ＋ 防静默改写护栏（拦截＋提示＋留痕）＋ HTTP 数据面＋浏览器半（设置区「DSH自定义」独立条目）＋ **纪律前置**（注入开关/编辑器/热生效/AGENTS 共存提示）＋ **作用域覆盖**（全局默认＋单工作区规则）＋ **深度自定义**（complete 整段接管：干跑校验/快照回滚/互斥探测）＋ **实际装配视图可切作用域**（全局｜任一活跃会话：真实请求同法 `assemble({agent, scope: agent})`）＋ **9 区导航完全体**（概览/提示词中心〔常驻核心/我的提示词/渐进加载层〕/接管官方/作用域/快照〔含备份〕/审计/治理只读/设置；2026-10-18 实机走查通过）＋ **user-prompt 三段装配**（order −1990，空=不注入）＋ **layered 管理**（出厂副本/用户镜像/单节恢复/停用/白名单）。
 > P3（导出导入/英文文案等）为可选增强。设计档：
 > `D:/DeepSeek/dsh-plugin-dev/docs/design-specs/dsh-custom-prompt-design-20261017.md`
 > 交接文档（P0 现场、卡点、环境）：`D:/DeepSeek/dsh-plugin-dev/docs/handover-dsh-custom-20261017.md`
@@ -31,7 +31,8 @@ $DSH_HOME/dsh-custom/
 ## 数据面与界面（P0＋P1a 已实现）
 
 - **HTTP 数据面（宿主半）**：`GET /api/dsh-custom/assembly`（实际装配视图：分区＋归属＋渲染全文；可选 `?session=<id>` 切会话作用域实取）｜`GET /api/dsh-custom/sessions`（活跃会话清单）｜`GET /api/dsh-custom/status`（存储/护栏/会话外改动）｜`GET|PUT /api/dsh-custom/discipline`（纪律文本读/写；写=快照＋落盘＋留痕）｜`GET|PUT /api/dsh-custom/settings`（注入开关）｜`GET|PUT /api/dsh-custom/scope`（工作区规则；写=快照＋留痕）｜`GET|PUT /api/dsh-custom/override`（接管文本；写=干跑校验＋快照）｜`PUT /api/dsh-custom/override/enable`（接管开关；启用带互斥探测）｜`GET /api/dsh-custom/backups`＋`PUT .../backups/restore`（快照列表/一键回滚）｜`GET /api/dsh-custom/agents`（AGENTS.md 共存信息）。经 `ctx.inject(['webServer'])` 挂载（`server.register({kind:'prefix',…})`），浏览器半同源 fetch。
-- **浏览器半（`client.js`）**：`window.__ModuleLoader__.load` 形态（仅依赖宿主 externals：react）；注册 `settings.section` 设置导航条目「DSH自定义」（id `dsh-custom`，order 30；2026-10-17 由「内置插件」分区页签移出——实机实测该页签本已注册可见，但入口层级过深、可见性不佳）；双视图＝装配全文（渲染）/分区源码；归属徽标 ours/official/other。
+- **浏览器半（`client.js`）**：`window.__ModuleLoader__.load` 形态（仅依赖宿主 externals：react）；注册 `settings.section` 设置导航条目「DSH自定义」（id `dsh-custom`，order 30；2026-10-17 由「内置插件」分区页签移出——实机实测该页签本已注册可见，但入口层级过深、可见性不佳）；**9 区导航完全体**（2026-10-17 批次三推倒重写）：概览（渲染全文/分区源码＋装配指纹＋变量表）｜提示词中心（常驻核心/我的提示词/渐进加载层三子区）｜接管官方｜作用域｜快照（含备份）｜审计｜治理（只读占位，诚实不伪造）｜设置；各 Zone 独立取数、六态覆盖。归属徽标 ours/official/other。
+- **批次三/四 已验证（2026-10-18 实机走查）**：8 区导航逐区渲染通过（备份并入快照区；治理=诚实占位）；提示词中心三子区（常驻核心总开关/我的提示词空=不注入/渐进加载层指纹全一致）实机在位；user-prompt 段（order −1990）与 layered 用户镜像/停用/恢复经 25 例单测＋API 验证（跨插件契约：引擎侧用户目录优先＋mtime 热生效＋停用跳过注入）。证据：`D:/tmp/wt-20261018-a/03..12b-*.png`＋`audit.jsonl`。测试 132→**157/157**。
 - **已验证（2026-10-17，桌面 App 实测·收口轮）**：①入口＝设置导航区「DSH自定义」一级条目（`settings.section`，order 30）实机可见；②渲染视图在线：宿主渲染器经分层解析（`host-argv→ctx-baseUrl→loader-internal→module-url→bare`）取宿主同源副本（App＝asar 内 0.2.1-rc.1），严格渲染被运行时变量阻止时转容错渲染（未解析 `{{变量}}` 原文呈现＋标注＋audit `render-tolerate`）；③护栏负向控制通过：真模型写存储被 `guard-deny` 拦截＋audit 留痕＋文件零改动（fail-closed）；④存储落盘/API 200/状态页脚全通。证据：`D:\tmp\dsh-custom-smoke\shot-09/10/11/13`＋`audit.jsonl`。
 - **P1a 已验证（2026-10-17，桌面 App 实测）**：①开=模型可见前置纪律：注入后会话日志 `system/message` 首段即纪律文本（其后接官方身份行），模型逐字引用口令自证；②关=纯净（对照）：同会话下一轮 `system/message` 无纪律文本、模型核对后回答「没有」；③**热生效**：无需重启，同会话两轮之间开关切换即时生效（组装重发）；④编辑器保存产生快照＋`discipline-saved` 留痕；⑤AGENTS.md 共存提示实机显示（2463 字节）。证据：`shot-14/15/20/24/35`＋会话日志 `system/message` seq 对比＋`audit.jsonl`。
 - **P1b 已验证（2026-10-17，桌面 App 实测·五态机证）**：同一会话日志 `system/message` 逐轮对比——装前无标记（seq=7）→ 全局注入（seq=38）→ 总开关关（seq=50）→ **工作区规则覆盖**（seq=62：前缀命中会话 cwd，规则文本遮蔽全局、全局不出现）→ **该位置关闭**（seq=76：空正文规则，全部不注入）；模型逐轮核对自证（引用规则文本／「全局不存在」／「都不存在」）。测试 78→**100/100**（匹配优先级/合成/API 22 例）。证据：`shot-37/38/39`＋会话日志 seq 对比＋`audit.jsonl`（scope-saved）。
