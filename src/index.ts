@@ -112,6 +112,9 @@ const SEED_FILES: Record<string, string> = {
   'override.md': '',
   'scope.json': '{\n  "version": 1,\n  "rules": []\n}\n',
   'settings.json': '{\n  "version": 1,\n  "injectEnabled": true\n}\n',
+  // 治理开关（P46，2026-10-18）：页面写 → 运行时插件 mtime 热读（layered-state 同款跨包管道）。
+  // 刻意不加入 TRACKED（可再生态，回滚语义不覆盖它）。
+  'governance.json': '{\n  "version": 1\n}\n',
 }
 
 const TRACKED = ['discipline.md', 'override.md', 'scope.json', 'settings.json']
@@ -606,11 +609,155 @@ export function saveSettings(root: string, patch: { injectEnabled?: unknown; ove
     enabled: typeof patch.injectEnabled === 'boolean' ? patch.injectEnabled : cur.enabled,
     overrideEnabled: typeof patch.overrideEnabled === 'boolean' ? patch.overrideEnabled : cur.overrideEnabled,
   }
-  writeFileSync(join(root, 'settings.json'), JSON.stringify({ version: 1, injectEnabled: next.enabled, overrideEnabled: next.overrideEnabled }, null, 2) + '\n', 'utf8')
+  // #决策 2026-10-18（P46 回归修复）：旧形态整写三键会丢 userPromptEnabled → merge 写保留未知键
+  let raw: Record<string, unknown> = {}
+  try { raw = JSON.parse(readFileSync(join(root, 'settings.json'), 'utf8')) as Record<string, unknown> } catch { /* 损坏=种子重建 */ }
+  writeFileSync(join(root, 'settings.json'), JSON.stringify({ ...raw, version: 1, injectEnabled: next.enabled, overrideEnabled: next.overrideEnabled }, null, 2) + '\n', 'utf8')
   forgetCachedFile(join(root, 'settings.json'))
   recordHashes(root, ['settings.json'])
   audit(root, { kind: 'settings-saved', injectEnabled: next.enabled, overrideEnabled: next.overrideEnabled })
   return next
+}
+
+// ── 治理开关（P46；#决策 2026-10-18）──────────────────────────────
+// 本插件=写面：$DSH_HOME/dsh-custom/governance.json → 运行时插件 mtime 热读（layered-state 同款跨包管道）。
+// noExempt 域（编码/解码执行）不开放关闭与白名单——422 拒绝为第一道，引擎侧 effectiveRulesFor 强制保留为第二道。
+// 白名单条目=归一化字面子串＋词边界（与运行时拒绝指纹同语义），最短 4 字符。
+export const GOVERNANCE_VERSION = 1
+const GOV_ALLOW_MIN_LEN = 4
+// 域目录（镜像副本：真源=dsh-plugin-dev content/rules.json l3Domains；rules 变更须同批同步）
+const L3_DOMAIN_CATALOG: Array<{ domain: string; noExempt: boolean }> = [
+  { domain: '编码执行', noExempt: true },
+  { domain: '解码执行', noExempt: true },
+  { domain: '数据删除', noExempt: false },
+  { domain: '远端执行', noExempt: false },
+  { domain: '敏感路径写', noExempt: false },
+  { domain: '远端写/发布', noExempt: false },
+  { domain: '生产配置写', noExempt: false },
+  { domain: '权限变更', noExempt: false },
+  { domain: '系统迁移/覆盖', noExempt: false },
+  { domain: '破坏性远端操作', noExempt: false },
+]
+
+export interface GovernanceView {
+  version: number
+  l3Enabled: boolean
+  domainsOff: string[]
+  allowlist: Array<{ pattern: string; note: string }>
+  levelChecklist: boolean
+  compactionSignal: boolean
+  concludeOnPass: boolean
+  domains: Array<{ domain: string; noExempt: boolean; off: boolean }>
+}
+
+function readGovernanceRaw(root: string): Record<string, unknown> {
+  try {
+    const f = readCachedFile(join(root, 'governance.json'))
+    return f ? (JSON.parse(f.text) as Record<string, unknown>) : { version: GOVERNANCE_VERSION }
+  } catch {
+    return { version: GOVERNANCE_VERSION }
+  }
+}
+function writeGovernanceRaw(root: string, raw: Record<string, unknown>): void {
+  writeFileSync(join(root, 'governance.json'), JSON.stringify({ version: GOVERNANCE_VERSION, ...raw }, null, 2) + '\n', 'utf8')
+  forgetCachedFile(join(root, 'governance.json'))
+}
+
+export function readGovernance(root: string): GovernanceView {
+  const raw = readGovernanceRaw(root)
+  const l3 = (raw.l3 ?? {}) as { enabled?: unknown; domainsOff?: unknown; allowlist?: unknown }
+  const noExemptSet = new Set(L3_DOMAIN_CATALOG.filter((d) => d.noExempt).map((d) => d.domain))
+  const domainsOff = Array.isArray(l3.domainsOff)
+    ? (l3.domainsOff as unknown[]).filter((d): d is string => typeof d === 'string' && !noExemptSet.has(d))
+    : []
+  const allowlist = Array.isArray(l3.allowlist)
+    ? (l3.allowlist as Array<Record<string, unknown>>)
+        .filter((e) => e && typeof e.pattern === 'string')
+        .map((e) => ({ pattern: e.pattern as string, note: typeof e.note === 'string' ? (e.note as string).slice(0, 200) : '' }))
+    : []
+  return {
+    version: GOVERNANCE_VERSION,
+    l3Enabled: l3.enabled !== false,
+    domainsOff,
+    allowlist,
+    levelChecklist: raw.levelChecklist !== false,
+    compactionSignal: raw.compactionSignal !== false,
+    concludeOnPass: raw.concludeOnPass === true,
+    domains: L3_DOMAIN_CATALOG.map((d) => ({ ...d, off: domainsOff.includes(d.domain) })),
+  }
+}
+
+export type GovernanceSaveResult = { ok: true; view: GovernanceView } | { ok: false; status: 422; error: string }
+
+function governanceNormalized(pattern: string): string {
+  return pattern.replace(/\s+/g, ' ').trim().toLowerCase()
+}
+
+export function saveGovernance(root: string, patch: Record<string, unknown>): GovernanceSaveResult {
+  const noExemptSet = new Set(L3_DOMAIN_CATALOG.filter((d) => d.noExempt).map((d) => d.domain))
+  const knownDomains = new Set(L3_DOMAIN_CATALOG.map((d) => d.domain))
+  const cur = readGovernanceRaw(root)
+  const l3 = { ...((cur.l3 ?? {}) as Record<string, unknown>) }
+  if (patch.l3 !== undefined) {
+    if (!patch.l3 || typeof patch.l3 !== 'object' || Array.isArray(patch.l3)) return { ok: false, status: 422, error: 'l3 必须为对象' }
+    const p = patch.l3 as Record<string, unknown>
+    if (p.enabled !== undefined) {
+      if (typeof p.enabled !== 'boolean') return { ok: false, status: 422, error: 'l3.enabled 必须为 boolean' }
+      l3.enabled = p.enabled
+    }
+    if (p.domainsOff !== undefined) {
+      if (!Array.isArray(p.domainsOff) || !p.domainsOff.every((d) => typeof d === 'string')) return { ok: false, status: 422, error: 'l3.domainsOff 必须为 string[]' }
+      for (const d of p.domainsOff as string[]) {
+        if (!knownDomains.has(d)) return { ok: false, status: 422, error: `未知域「${d}」` }
+        if (noExemptSet.has(d)) return { ok: false, status: 422, error: `域「${d}」不可豁免（编码/解码执行不开放关闭与白名单）` }
+      }
+      l3.domainsOff = p.domainsOff
+    }
+    if (p.allowlist !== undefined) return { ok: false, status: 422, error: '白名单请走 /governance/allowlist 接口（POST/DELETE）' }
+  }
+  for (const key of ['levelChecklist', 'compactionSignal', 'concludeOnPass'] as const) {
+    if (patch[key] !== undefined) {
+      if (typeof patch[key] !== 'boolean') return { ok: false, status: 422, error: `${key} 必须为 boolean` }
+      cur[key] = patch[key]
+    }
+  }
+  if (Object.keys(l3).length > 0) cur.l3 = l3
+  writeGovernanceRaw(root, cur)
+  const view = readGovernance(root)
+  audit(root, { kind: 'governance-changed', patch: JSON.stringify(patch).slice(0, 300), l3Enabled: view.l3Enabled, domainsOff: view.domainsOff.length, allowlist: view.allowlist.length })
+  return { ok: true, view }
+}
+
+export function governanceAllowlistAdd(root: string, pattern: unknown, note: unknown): GovernanceSaveResult {
+  if (typeof pattern !== 'string' || pattern.trim() === '') return { ok: false, status: 422, error: 'pattern 必须为非空字符串' }
+  const norm = governanceNormalized(pattern)
+  if (norm.length < GOV_ALLOW_MIN_LEN) return { ok: false, status: 422, error: `pattern 归一化后短于 ${GOV_ALLOW_MIN_LEN} 字符（防全域放行）` }
+  const cur = readGovernanceRaw(root)
+  const l3 = { ...((cur.l3 ?? {}) as Record<string, unknown>) }
+  const list = Array.isArray(l3.allowlist) ? [...(l3.allowlist as Array<Record<string, unknown>>)] : []
+  if (list.some((e) => governanceNormalized(String(e.pattern ?? '')) === norm)) return { ok: false, status: 422, error: '该条目已存在' }
+  list.push({ pattern, note: typeof note === 'string' ? note.slice(0, 200) : '' })
+  l3.allowlist = list
+  cur.l3 = l3
+  writeGovernanceRaw(root, cur)
+  const view = readGovernance(root)
+  audit(root, { kind: 'governance-allowlist', action: 'add', pattern: pattern.slice(0, 120) })
+  return { ok: true, view }
+}
+
+export function governanceAllowlistRemove(root: string, pattern: unknown): GovernanceSaveResult {
+  if (typeof pattern !== 'string' || pattern === '') return { ok: false, status: 422, error: 'pattern 必须为非空字符串' }
+  const cur = readGovernanceRaw(root)
+  const l3 = { ...((cur.l3 ?? {}) as Record<string, unknown>) }
+  const list = Array.isArray(l3.allowlist) ? [...(l3.allowlist as Array<Record<string, unknown>>)] : []
+  const next = list.filter((e) => e.pattern !== pattern)
+  if (next.length === list.length) return { ok: false, status: 422, error: '条目不存在' }
+  l3.allowlist = next
+  cur.l3 = l3
+  writeGovernanceRaw(root, cur)
+  const view = readGovernance(root)
+  audit(root, { kind: 'governance-allowlist', action: 'remove', pattern: pattern.slice(0, 120) })
+  return { ok: true, view }
 }
 
 // ── 深改接管（P2；#决策 2026-10-17 18:0x）：complete 整段替换 ──────────
@@ -1584,6 +1731,45 @@ export function makeApi(
         })
         return
       }
+    }
+    if (pathname === '/api/dsh-custom/governance') {
+      if (method === 'GET') {
+        jsonResponse(res, 200, { ok: true, value: readGovernance(root) })
+        return
+      }
+      if (method === 'PUT') {
+        readJsonBody(req)
+          .then((body) => {
+            const r = saveGovernance(root, body)
+            if ('error' in r) { jsonResponse(res, r.status, { ok: false, error: r.error }); return }
+            jsonResponse(res, 200, { ok: true, value: r.view })
+          })
+          .catch((e: unknown) => jsonResponse(res, 400, { ok: false, error: String((e as { message?: unknown })?.message ?? e) }))
+        return
+      }
+      jsonResponse(res, 405, { ok: false, error: 'method not allowed' })
+      return
+    }
+    if (pathname === '/api/dsh-custom/governance/allowlist') {
+      if (method === 'POST') {
+        readJsonBody(req)
+          .then((body) => {
+            const r = governanceAllowlistAdd(root, body.pattern, body.note)
+            if ('error' in r) { jsonResponse(res, r.status, { ok: false, error: r.error }); return }
+            jsonResponse(res, 200, { ok: true, value: r.view })
+          })
+          .catch((e: unknown) => jsonResponse(res, 400, { ok: false, error: String((e as { message?: unknown })?.message ?? e) }))
+        return
+      }
+      if (method === 'DELETE') {
+        const q = new URLSearchParams(String(req?.url ?? '').split('?')[1] ?? '')
+        const r = governanceAllowlistRemove(root, q.get('pattern'))
+        if ('error' in r) { jsonResponse(res, r.status, { ok: false, error: r.error }); return }
+        jsonResponse(res, 200, { ok: true, value: r.view })
+        return
+      }
+      jsonResponse(res, 405, { ok: false, error: 'method not allowed' })
+      return
     }
     if (pathname === '/api/dsh-custom/settings') {
       if (method === 'GET') {

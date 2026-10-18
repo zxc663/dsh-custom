@@ -75,6 +75,15 @@ window.__ModuleLoader__.load({
       '.dshc_toast .t{font-weight:600;font-size:13px;margin-bottom:2px}',
       '.dshc_toast .m{color:var(--dsw-alias-label-secondary);font-size:12px}',
       '.dshc_empty{color:var(--dsw-alias-label-secondary);padding:20px;text-align:center}',
+      // 治理开关页（P46）
+      '.dshc_trow{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:10px 14px;border-bottom:1px solid var(--dsw-alias-border-l2)}',
+      '.dshc_tlabel{font-size:13px;font-weight:600}',
+      '.dshc_tag{margin-left:8px;font-size:10px;color:var(--dsw-alias-state-warn-primary);border:1px solid currentColor;border-radius:4px;padding:0 5px;white-space:nowrap}',
+      '.dshc_banner{margin:0 14px 10px;padding:10px 12px;border:1px solid var(--dsw-alias-state-error-primary);border-radius:8px;color:var(--dsw-alias-state-error-primary);font-size:12px}',
+      '.dshc_allow{padding:4px 14px 10px}',
+      '.dshc_barrow2{display:grid;grid-template-columns:1fr 1fr 64px;gap:10px;align-items:center;padding:6px 0;border-bottom:1px solid var(--dsw-alias-border-l2);font-size:12px}',
+      '.dshc_barrow2 code{font-size:12px}',
+      '.dshc_input{flex:1;background:var(--dsw-alias-bg-overlay);border:1px solid var(--dsw-alias-border-l2);border-radius:6px;padding:7px 10px;color:inherit;font-size:12px}',
     ].join('\n');
     const CSS_TAG_ID = PLUGIN_ID + '/tab.css';
     if (typeof document !== 'undefined' && document.querySelector('style[data-plugin-css=' + JSON.stringify(CSS_TAG_ID) + ']') === null) {
@@ -418,12 +427,80 @@ window.__ModuleLoader__.load({
         err ? h('div', { className: 'dshc_err' }, h('span', null, err)) : null);
     }
 
+    // ── ⑤ 治理开关（P46）──
+    function Toggle(props) {
+      return h('div', { className: 'dshc_trow' },
+        h('div', null,
+          h('div', { className: 'dshc_tlabel' }, props.label, props.disabled ? h('span', { className: 'dshc_tag' }, '不可豁免') : null),
+          props.hint ? h('div', { className: 'dshc_hint' }, props.hint) : null,
+          props.dangerHint && !props.checked ? h('div', { className: 'dshc_er' }, props.dangerHint) : null),
+        h('button', { className: 'dshc_btn', disabled: props.disabled, onClick: () => props.onToggle(!props.checked) }, props.checked ? '已开启' : '已关闭'));
+    }
+    function GovernancePage() {
+      const [gov, setGov] = useState(null);
+      const [msg, setMsg] = useState(null);
+      const [newRule, setNewRule] = useState({ pattern: '', note: '' });
+      const load = useCallback(async () => {
+        try { setGov(await api('governance')); } catch (e) { setMsg({ title: '读取失败', detail: String((e && e.message) || e) }); }
+      }, []);
+      useEffect(() => { void load(); }, [load]);
+      const put = async (patch, okTitle) => {
+        try { await api('governance', { method: 'PUT', body: patch }); await load(); setMsg({ title: okTitle, detail: '已热生效（运行时插件按文件 mtime 自动重读）' }); }
+        catch (e) { setMsg({ title: '保存失败', detail: String((e && e.message) || e) }); }
+      };
+      const addAllow = async () => {
+        try { await api('governance/allowlist', { method: 'POST', body: newRule }); setNewRule({ pattern: '', note: '' }); await load(); setMsg({ title: '白名单已添加', detail: '命中该形态的命令将直接放行，不再弹审批卡' }); }
+        catch (e) { setMsg({ title: '添加失败', detail: String((e && e.message) || e) }); }
+      };
+      const delAllow = async (pattern) => {
+        try { await api('governance/allowlist?pattern=' + encodeURIComponent(pattern), { method: 'DELETE' }); await load(); setMsg({ title: '白名单已移除', detail: pattern }); }
+        catch (e) { setMsg({ title: '移除失败', detail: String((e && e.message) || e) }); }
+      };
+      if (gov === null) return h('div', { className: 'dshc_panel' }, h('div', { className: 'dshc_ph' }, h('h3', null, '治理开关')), h('div', { className: 'dshc_empty' }, '读取中…'));
+      const toggleDomain = (d) => {
+        const next = new Set(gov.domainsOff);
+        if (d.off) next.delete(d.domain); else next.add(d.domain);
+        void put({ l3: { domainsOff: [...next] } }, d.off ? '域已启用：' + d.domain : '域已关闭：' + d.domain);
+      };
+      return h('div', null,
+        h('div', { className: 'dshc_panel' },
+          h('div', { className: 'dshc_ph' }, h('h3', null, 'L3 危险操作拦截'), h('span', { className: 'dshc_spacer' }),
+            h('span', { className: 'dshc_hint' }, '保存即热生效'),
+            h('button', { className: 'dshc_btn', onClick: () => void load() }, '刷新')),
+          gov.l3Enabled === false ? h('div', { className: 'dshc_banner' }, '⚠ L3 拦截已关闭：命中仅记录不弹卡，防线只剩宿主沙箱与提示词文本。') : null,
+          h(Toggle, { label: '总开关', checked: gov.l3Enabled, hint: '10 个危险域词面判定（宿主沙箱之上的加严层），命中弹审批卡', dangerHint: '拦截退位仅记录——危险操作将不再询问', onToggle: (v) => void put({ l3: { enabled: v } }, v ? '拦截已开启' : '拦截已关闭') }),
+          gov.domains.map((d) => h('div', { key: d.domain, className: 'dshc_trow' },
+            h('div', { className: 'dshc_tlabel' }, d.domain, d.noExempt ? h('span', { className: 'dshc_tag' }, '不可豁免') : null),
+            h('button', { className: 'dshc_btn', disabled: d.noExempt, onClick: () => toggleDomain(d) },
+              d.noExempt ? '强制拦截' : d.off ? '已关闭' : '拦截中')))),
+        h('div', { className: 'dshc_panel' },
+          h('div', { className: 'dshc_ph' }, h('h3', null, '误拦白名单'), h('span', { className: 'dshc_hint' }, '命中白名单形态的命令直接放行，不再弹审批卡')),
+          h('div', { className: 'dshc_allow' },
+            gov.allowlist.length === 0 ? h('div', { className: 'dshc_empty' }, '暂无条目——审批卡误拦时，把该命令形态加到这里')
+              : gov.allowlist.map((e) => h('div', { key: e.pattern, className: 'dshc_barrow2' },
+                h('code', null, e.pattern),
+                h('span', { className: 'dshc_hint' }, e.note || ''),
+                h('button', { className: 'dshc_btn', onClick: () => void delAllow(e.pattern) }, '移除'))),
+            h('div', { className: 'dshc_row' },
+              h('input', { className: 'dshc_input', placeholder: '命令形态（如 docker ps；子串＋词边界，最短 4 字符）', value: newRule.pattern, onChange: (e) => setNewRule({ ...newRule, pattern: e.target.value }) }),
+              h('input', { className: 'dshc_input', placeholder: '备注（为什么放行）', value: newRule.note, onChange: (e) => setNewRule({ ...newRule, note: e.target.value }) }),
+              h('button', { className: 'dshc_btn', onClick: () => void addAllow() }, '添加')),
+            h('div', { className: 'dshc_hint' }, '提示：可先在「统计数据 → 审计时间线」核对误拦记录，再按命令形态加白名单。'))),
+        h('div', { className: 'dshc_panel' },
+          h('div', { className: 'dshc_ph' }, h('h3', null, '工作流能力开关')),
+          h(Toggle, { label: '判级与任务清单强制', checked: gov.levelChecklist, hint: '实质工作回合缺状态行判级/验收登记时自动打回', onToggle: (v) => void put({ levelChecklist: v }, v ? '判级强制已开启' : '判级强制已关闭') }),
+          h(Toggle, { label: '压缩重载信号', checked: gov.compactionSignal, hint: '上下文压缩后注入重载序提示（保持长会话精度）', onToggle: (v) => void put({ compactionSignal: v }, v ? '压缩信号已开启' : '压缩信号已关闭') }),
+          h(Toggle, { label: '收口即终结（不推荐）', checked: gov.concludeOnPass, hint: 'gate 通过后立即结束回合——仅排障用；改动需重启 DSH 生效', dangerHint: '开启后交付文本可能被吞、到不了用户', onToggle: (v) => void put({ concludeOnPass: v }, v ? '已保存（重启 DSH 后生效）' : '已保存（重启 DSH 后生效）') })),
+        h(Toast, { msg }));
+    }
+
     // ── 外壳 ──
     const PAGES = [
       ['sessions', '会话管理'],
       ['prompts', '系统提示词管理'],
       ['snapshots', '快照与恢复'],
       ['stats', '统计数据'],
+      ['governance', '治理开关'],
     ];
     function Tab() {
       const [page, setPage] = useState('sessions');
@@ -438,7 +515,8 @@ window.__ModuleLoader__.load({
         page === 'sessions' ? h(SessionsPage, { toast: { msg: toastMsg } })
           : page === 'prompts' ? h(PromptsPage)
           : page === 'snapshots' ? h(SnapshotsPage)
-          : h(StatsPage),
+          : page === 'stats' ? h(StatsPage)
+          : h(GovernancePage),
         h(Toast, { msg: toastMsg }));
     }
 
