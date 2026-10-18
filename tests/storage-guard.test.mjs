@@ -167,7 +167,8 @@ try {
   check('backups 下出现快照目录', backups.length >= 1)
 
   const st = collectStatus(tmp, { denied: 2, touched: 3 })
-  check('collectStatus 汇总文件与护栏计数', st.files.length === 4 && st.guard.denied === 2 && st.files.every((f) => typeof f.hash === 'string'))
+  check('collectStatus 汇总文件与护栏计数', st.files.length === 5 && st.guard.denied === 2 && st.files.every((f) => typeof f.hash === 'string'))
+  check('TRACKED 已含 user-prompt.md（快照/外部改动/状态面同口径）', st.files.some((f) => f.name === 'user-prompt.md'))
 } finally {
   rmSync(tmp, { recursive: true, force: true })
 }

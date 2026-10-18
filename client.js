@@ -1,4 +1,4 @@
-// dsh-custom 浏览器半（管理后台重构版）：设置区「DSH自定义」
+﻿// dsh-custom 浏览器半（管理后台重构版）：设置区「DSH自定义」
 // ① 会话管理 ② 系统提示词管理 ③ 快照与恢复 ④ 统计数据
 // 形态：__ModuleLoader__.load 内联 factory；仅依赖宿主 externals（react）；数据来自同源 /api/dsh-custom/*。
 // 视觉：只使用宿主已暴露主题 token（--dsw-alias-*），不引用不存在的 layer-3/tertiary/business 等。
@@ -77,6 +77,12 @@ window.__ModuleLoader__.load({
       '.dshc_toast .t{font-weight:600;font-size:13px;margin-bottom:2px}',
       '.dshc_toast .m{color:var(--dsw-alias-label-secondary);font-size:12px}',
       '.dshc_empty{color:var(--dsw-alias-label-secondary);padding:20px;text-align:center}',
+      '.dshc_conv{max-height:360px;overflow:auto;border:1px solid var(--dsw-alias-border-l2);border-radius:8px;padding:8px 10px;margin-top:8px;display:flex;flex-direction:column;gap:10px}',
+      '.dshc_convmsg .h{font-size:11px;color:var(--dsw-alias-label-secondary);margin-bottom:3px}',
+      '.dshc_convmsg .h .t{margin-left:8px}',
+      '.dshc_convmsg .b{white-space:pre-wrap;word-break:break-word;font-size:13px;line-height:19px}',
+      '.dshc_convmsg[data-role=assistant] .b{color:var(--dsw-alias-label-secondary)}',
+      '.dshc_prevlist{margin:6px 0 0;padding-left:18px;color:var(--dsw-alias-label-secondary);font-size:12px;line-height:19px}',
       // 治理开关页（P46）
       '.dshc_trow{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:10px 14px;border-bottom:1px solid var(--dsw-alias-border-l2)}',
       '.dshc_tlabel{font-size:13px;font-weight:600}',
@@ -123,7 +129,12 @@ window.__ModuleLoader__.load({
         const text = await r.text();
         let j = null;
         try { j = JSON.parse(text); } catch { throw new Error('响应不是 JSON（HTTP ' + r.status + '）'); }
-        if (!j || j.ok !== true) throw new Error((j && j.error) || ('HTTP ' + r.status));
+        if (!j || j.ok !== true) {
+          const e = new Error((j && j.error) || ('HTTP ' + r.status));
+          e.status = r.status; // P1-6：409=乐观锁冲突（调用方据此弹「重新加载/覆盖」）
+          e.conflict = j && j.conflict ? j.conflict : null;
+          throw e;
+        }
         return j.value;
       } finally {
         clearTimeout(timer);
@@ -158,6 +169,78 @@ window.__ModuleLoader__.load({
         props.msg.detail ? h('div', { className: 'm' }, props.msg.detail) : null);
     }
 
+    // ── 导入/导出弹窗（P1-3，#决策 12：JSON＋剪贴板＋边输入边预览）──
+    // 会话域与全局域共用：props={ scope, sessionId, title, hint, buildExport, apply, onApplied, onClose }
+    const IO_SEG_LABELS = { discipline: '前置纪律', user: '我的提示词', system: '整段接管', layered: '渐进加载层' };
+    function parseImportJson(txt, scope, sessionId) {
+      if (!txt || !txt.trim()) return { error: null, plan: null };
+      let j;
+      try { j = JSON.parse(txt); } catch (e) { return { error: 'JSON 解析失败：' + String((e && e.message) || e), plan: null }; }
+      if (!j || typeof j !== 'object' || Array.isArray(j)) return { error: '顶层必须是 JSON 对象', plan: null };
+      if (j.format !== 'dsh-custom/export') return { error: '不是本插件的导出格式（format 应为 "dsh-custom/export"）', plan: null };
+      if (j.version !== 1) return { error: '版本不支持：' + String(j.version) + '（本窗口支持 version 1）', plan: null };
+      if (j.scope !== scope) return { error: '作用域不匹配：这份 JSON 是 ' + String(j.scope) + ' 导出，本窗口只接受 ' + (scope === 'session' ? '会话（session）' : '全局（global）') + ' 导出', plan: null };
+      if (scope === 'session' && typeof j.sessionId === 'string' && j.sessionId.length > 0 && j.sessionId !== sessionId) {
+        return { error: '会话不匹配：导出的是 ' + j.sessionId.replace(/^session-/, '').slice(0, 8) + '，当前选中的是 ' + String(sessionId || '').replace(/^session-/, '').slice(0, 8) + '（防串档，已在会话页选中目标会话再导入）', plan: null };
+      }
+      const segs = j.segments;
+      if (!segs || typeof segs !== 'object' || Array.isArray(segs)) return { error: 'segments 缺失或不是对象', plan: null };
+      const plan = {};
+      for (const k of ['discipline', 'user', 'system', 'layered']) {
+        if (!(k in segs)) continue;
+        const v = segs[k];
+        if (v === null) { plan[k] = { action: 'clear', chars: 0 }; continue; }
+        if (typeof v !== 'string') return { error: '段「' + IO_SEG_LABELS[k] + '」必须是字符串或 null', plan: null };
+        plan[k] = v.trim().length === 0 ? { action: 'clear', chars: 0 } : { action: 'write', chars: v.length, text: v };
+      }
+      if (Object.keys(plan).length === 0) return { error: '没有任何可应用的段（segments 全为空对象）', plan: null };
+      return { error: null, plan };
+    }
+    function ExportImportModal(props) {
+      const [text, setText] = useState('');
+      const [applying, setApplying] = useState(false);
+      const [applyErr, setApplyErr] = useState(null);
+      const [copied, setCopied] = useState(false);
+      const parsed = parseImportJson(text, props.scope, props.sessionId);
+      const plan = parsed.plan;
+      const systemWrite = !!(plan && plan.system && plan.system.action === 'write');
+      const fill = () => {
+        try { setText(JSON.stringify(props.buildExport(), null, 2)); setApplyErr(null); } catch (e) { setApplyErr(String((e && e.message) || e)); }
+      };
+      const copy = async () => {
+        try { await navigator.clipboard.writeText(text); setCopied(true); setTimeout(() => setCopied(false), 1500); }
+        catch { setApplyErr('复制失败——请手动全选文本框内容复制（Ctrl+A / Ctrl+C）'); }
+      };
+      return h(Modal, { open: true, title: props.title, onClose: props.onClose,
+        actions: h('div', { className: 'dshc_row' }, h('button', { className: 'dshc_btn', onClick: props.onClose }, '关闭')) },
+        h('div', null,
+          h('p', null, props.hint),
+          h('div', { className: 'dshc_row' },
+            h('button', { className: 'dshc_btn', onClick: fill }, '导出到下方文本框'),
+            h('button', { className: 'dshc_btn', disabled: !text, onClick: () => void copy() }, copied ? '已复制' : '复制'),
+            h('button', { className: 'dshc_btn', disabled: !text, onClick: () => { setText(''); setApplyErr(null); } }, '清空')),
+          h('textarea', { className: 'dshc_ta', style: { minHeight: 170, marginTop: 8 }, value: text, onChange: (e) => { setText(e.target.value); setApplyErr(null); }, placeholder: '把导出的 JSON 粘贴到这里（Ctrl+V）→ 下方实时预览；或点上方「导出到下方文本框」把当前内容生成为 JSON' }),
+          parsed.error ? h('div', { className: 'dshc_err', style: { margin: '10px 0 0' } }, h('span', null, parsed.error)) : null,
+          plan ? h('div', { style: { marginTop: 10 } },
+            h('div', { className: 'dshc_hint' }, '预览（点应用后按此写入）：'),
+            h('ul', { className: 'dshc_prevlist' },
+              ['discipline', 'user', 'system', 'layered'].map((k) => {
+                const p = plan[k];
+                const desc = p ? (p.action === 'write' ? '写入 ' + p.chars + ' 字' : '清除该段覆盖（留空＝关闭）') : '不包含（保持现状）';
+                return h('li', { key: k }, IO_SEG_LABELS[k] + '：' + desc);
+              })),
+            systemWrite ? h('div', { className: 'dshc_banner', style: { margin: '8px 0 0' } }, '⚠ 导入包含整段接管：保存后会替换该作用域的全部系统提示词段（含运行时核心与官方段），请确认文本来源可信。') : null,
+            h('div', { className: 'dshc_row', style: { marginTop: 10 } },
+              h('button', { className: 'dshc_btn', 'data-primary': true, disabled: applying, onClick: async () => {
+                setApplying(true); setApplyErr(null);
+                try { await props.apply(plan); props.onApplied(); }
+                catch (e) { setApplyErr(String((e && e.message) || e)); }
+                finally { setApplying(false); }
+              } }, applying ? '应用中…' : (systemWrite ? '确认导入（含整段接管）' : '应用导入'))))
+          : null,
+          applyErr ? h('div', { className: 'dshc_err', style: { margin: '10px 0 0' } }, h('span', null, '应用失败：' + applyErr)) : null));
+    }
+
     // ── ① 会话管理 ──
     function SessionsPage(props) {
       const [sessions, setSessions] = useState([]);
@@ -165,6 +248,7 @@ window.__ModuleLoader__.load({
       const [search, setSearch] = useState('');
       const [detail, setDetail] = useState(null);
       const [segs, setSegs] = useState(null);
+      const [segsMeta, setSegsMeta] = useState({});
       const [seg, setSeg] = useState('current');
       const [editing, setEditing] = useState(false);
       const [draft, setDraft] = useState('');
@@ -174,6 +258,7 @@ window.__ModuleLoader__.load({
       const [msg, setMsg] = useState(null);
       const [err, setErr] = useState(null);
       const [modal, setModal] = useState(null);
+      const [ioOpen, setIoOpen] = useState(false);
       const detailSeq = useRef(0);
 
       // 跨页防丢：把「正在编辑且未保存」上报给外壳（切页统一确认）
@@ -206,6 +291,7 @@ window.__ModuleLoader__.load({
           if (seq !== detailSeq.current) return; // 快速切会话：晚到响应不得覆盖当前详情
           setDetail(r[0]);
           setSegs(r[1].segments || {});
+          setSegsMeta(r[1].mtimes || {});
           setEditing(false);
           setDirty(false);
         } catch (e) {
@@ -280,12 +366,31 @@ window.__ModuleLoader__.load({
       };
       const cancelEdit = () => { setEditing(false); setDirty(false); };
 
-      const save = async () => {
+      // P1-6 乐观锁：保存带基线 mtime；409 → 「重新加载 / 仍要覆盖」由用户决定
+      const showConflict = (e) => {
+        setModal({
+          title: '内容已在别处被修改',
+          body: h('div', null,
+            h('p', null, String((e && e.message) || '当前版本与你的编辑基线不一致。')),
+            h('p', null, '「重新加载」查看最新内容（放弃你的本次修改）；「仍要覆盖」用你编辑的内容覆盖对方改动。')),
+          actions: h('div', { className: 'dshc_row' },
+            h('button', { className: 'dshc_btn', onClick: () => { setModal(null); cancelEdit(); void loadDetail(activeId); setMsg({ title: '已重新加载', detail: '未保存的修改已丢弃；可再次点「修改」基于最新内容编辑。' }); } }, '重新加载（放弃我的修改）'),
+            h('button', { className: 'dshc_btn', 'data-danger': true, onClick: () => { setModal(null); void save(true); } }, '仍要覆盖（用我的版本）')),
+        });
+      };
+      const save = async (force) => {
         if (!activeId || busy) return;
         setBusy(true);
         try {
+          const expectedFor = (keys) => {
+            const m = {};
+            for (const k of keys) m[k] = Object.prototype.hasOwnProperty.call(segsMeta, k) ? segsMeta[k] : null;
+            return m;
+          };
           if (seg === 'system' && draft.trim().length === 0) {
-            await api('sessions/' + encodeURIComponent(activeId) + '/override', { method: 'PUT', body: { segments: { system: '' } } });
+            const body = { segments: { system: '' } };
+            if (!force) body.expectedMtimes = expectedFor(['system']);
+            await api('sessions/' + encodeURIComponent(activeId) + '/override', { method: 'PUT', body });
             await loadDetail(activeId);
             setMsg({ title: '已清除整段接管', detail: '该会话回到全局/官方系统提示词；没有创建空提示词。' });
             return;
@@ -293,11 +398,16 @@ window.__ModuleLoader__.load({
           const segments = {};
           if (seg === 'discipline' || seg === 'user' || seg === 'system') segments[seg] = draft;
           if (Object.keys(segments).length === 0) return;
-          await api('sessions/' + encodeURIComponent(activeId) + '/override', { method: 'PUT', body: { segments } });
+          const body = { segments };
+          if (!force) body.expectedMtimes = expectedFor(Object.keys(segments));
+          await api('sessions/' + encodeURIComponent(activeId) + '/override', { method: 'PUT', body });
           setDirty(false);
           await loadDetail(activeId);
           setMsg({ title: '已保存', detail: '会话级覆盖已落盘＋快照；下一条消息生效。全局改动不会覆盖本会话。' });
-        } catch (e) { setErr('保存失败：' + String((e && e.message) || e)); }
+        } catch (e) {
+          if (e && e.status === 409 && !force) { setBusy(false); showConflict(e); return; }
+          setErr('保存失败：' + String((e && e.message) || e));
+        }
         finally { setBusy(false); }
       };
       const requestSave = () => {
@@ -311,6 +421,54 @@ window.__ModuleLoader__.load({
             h('button', { className: 'dshc_btn', 'data-danger': true, onClick: () => { setModal(null); void save(); } }, '确认整段接管'),
             h('button', { className: 'dshc_btn', onClick: () => setModal(null) }, '取消')),
         });
+      };
+
+      // ── P1-3：对话弹窗（只读）＋导入/导出 ──
+      const openConversation = async () => {
+        if (!activeId || busy) return;
+        setBusy(true);
+        try {
+          const v = await api('sessions/' + encodeURIComponent(activeId) + '/conversation');
+          const hiddenNote = v.hidden > 0
+            ? '已隐藏 ' + v.hidden + ' 条非对话条目（纪律/状态行/审批应答/系统快照等注入件）。'
+            : '没有需要隐藏的注入条目。';
+          setModal({
+            title: '会话对话（只读）',
+            body: h('div', null,
+              h('p', null, '仅显示对话文本（不含思考/工具调用）；' + hiddenNote + (v.omitted > 0 ? ' 更早的 ' + v.omitted + ' 条已省略。' : '')),
+              (v.messages || []).length === 0
+                ? h('div', { className: 'dshc_empty' }, '该会话还没有对话文本')
+                : h('div', { className: 'dshc_conv' },
+                  v.messages.map((m, i) => h('div', { key: i, className: 'dshc_convmsg', 'data-role': m.role },
+                    h('div', { className: 'h' }, m.role === 'user' ? '你' : '助手', h('span', { className: 't' }, m.time ? new Date(m.time).toLocaleString() : '')),
+                    h('div', { className: 'b' }, m.text + (m.truncated ? '\n…（过长已截断）' : '')))))),
+            actions: h('div', { className: 'dshc_row' }, h('button', { className: 'dshc_btn', onClick: () => setModal(null) }, '关闭')),
+          });
+        } catch (e) { setErr('对话读取失败：' + String((e && e.message) || e)); }
+        finally { setBusy(false); }
+      };
+      const buildSessionExport = () => ({
+        format: 'dsh-custom/export',
+        version: 1,
+        scope: 'session',
+        sessionId: activeId,
+        exportedAt: new Date().toISOString(),
+        segments: {
+          discipline: segs && segs.discipline !== undefined ? segs.discipline : null,
+          user: segs && segs.user !== undefined ? segs.user : null,
+          system: segs && segs.system !== undefined ? segs.system : null,
+          layered: segs && segs.layered !== undefined ? segs.layered : null,
+        },
+      });
+      const applySessionImport = async (plan) => {
+        const segments = {};
+        const expectedMtimes = {};
+        for (const k of Object.keys(plan)) {
+          segments[k] = plan[k].action === 'clear' ? '' : plan[k].text;
+          expectedMtimes[k] = Object.prototype.hasOwnProperty.call(segsMeta, k) ? segsMeta[k] : null;
+        }
+        await api('sessions/' + encodeURIComponent(activeId) + '/override', { method: 'PUT', body: { segments, expectedMtimes } });
+        await loadDetail(activeId);
       };
 
       const doRollback = async (target) => {
@@ -333,6 +491,16 @@ window.__ModuleLoader__.load({
         props.toast && props.toast.msg ? h(Toast, { msg: props.toast.msg }) : null,
         h(Modal, { open: modal !== null, title: modal ? modal.title : '', onClose: () => setModal(null), actions: modal ? modal.actions : null },
           modal ? modal.body : null),
+        ioOpen ? h(ExportImportModal, {
+          scope: 'session',
+          sessionId: activeId,
+          title: '导入/导出（本会话）',
+          hint: '导出＝把当前选中会话的覆盖段生成为 JSON（可复制留档/迁移）；导入＝粘贴 JSON，预览后应用到本会话。会话不匹配的导出会被拒绝（防串档）。',
+          buildExport: buildSessionExport,
+          apply: applySessionImport,
+          onApplied: () => { setIoOpen(false); setMsg({ title: '导入完成', detail: '已按预览写入本会话；下一条消息生效。' }); },
+          onClose: () => setIoOpen(false),
+        }) : null,
         err ? h('div', { className: 'dshc_err' }, h('span', null, err)) : null,
         h('div', { className: 'dshc_split' },
           h('aside', { className: 'dshc_panel' },
@@ -391,7 +559,8 @@ window.__ModuleLoader__.load({
                         h('button', { className: 'dshc_btn', 'data-danger': true, onClick: () => void doRollback('official') }, '回到官方（清除本会话覆盖）'))),
                     actions: h('button', { className: 'dshc_btn', onClick: () => setModal(null) }, '取消'),
                   }) }, '回滚') : null,
-                  h('button', { className: 'dshc_btn', disabled: true, title: '导入/导出尚未实现（规划中）' }, '导入/导出（未实现）')),
+                  !editing ? h('button', { className: 'dshc_btn', disabled: busy, onClick: () => setIoOpen(true) }, '导入/导出') : null,
+                  !editing ? h('button', { className: 'dshc_btn', disabled: busy, onClick: () => void openConversation() }, '对话') : null),
                 msg ? h('div', { className: 'dshc_hint', style: { marginTop: 8 } }, msg.title + '：' + (msg.detail || '')) : null))
               : h('div', { className: 'dshc_empty' }, '选择左侧会话查看详情')
           )));
@@ -409,6 +578,7 @@ window.__ModuleLoader__.load({
       const [msg, setMsg] = useState(null);
       const [err, setErr] = useState(null);
       const [modal, setModal] = useState(null);
+      const [ioOpen, setIoOpen] = useState(false);
       const [newSec, setNewSec] = useState({ name: '', text: '' });
       const loadSeq = useRef(0);
 
@@ -453,7 +623,19 @@ window.__ModuleLoader__.load({
             h('button', { className: 'dshc_btn', onClick: () => setModal(null) }, '继续编辑')),
         });
       };
-      const save = async () => {
+      // P1-6 乐观锁：全局保存带基线 mtime；409 → 「重新加载 / 仍要覆盖」
+      const showConflict = (e) => {
+        setModal({
+          title: '内容已在别处被修改',
+          body: h('div', null,
+            h('p', null, String((e && e.message) || '当前版本与你的编辑基线不一致。')),
+            h('p', null, '「重新加载」查看最新内容（放弃你的本次修改）；「仍要覆盖」用你编辑的内容覆盖对方改动。')),
+          actions: h('div', { className: 'dshc_row' },
+            h('button', { className: 'dshc_btn', onClick: () => { setModal(null); void load(); setMsg({ title: '已重新加载', detail: '未保存的修改已丢弃；可基于最新内容重新编辑。' }); } }, '重新加载（放弃我的修改）'),
+            h('button', { className: 'dshc_btn', 'data-danger': true, onClick: () => { setModal(null); void save(true); } }, '仍要覆盖（用我的版本）')),
+        });
+      };
+      const save = async (force) => {
         if (busy) return;
         if (seg === 'system' && draft.trim().length === 0) {
           setBusy(true);
@@ -471,15 +653,29 @@ window.__ModuleLoader__.load({
         }
         setBusy(true);
         try {
-          if (seg === 'discipline') await api('discipline', { method: 'PUT', body: { text: draft } });
-          else if (seg === 'user') await api('user-prompt', { method: 'PUT', body: { text: draft, enabled: data.user ? data.user.enabled : true } });
-          else if (seg === 'system') {
-            await api('override', { method: 'PUT', body: { text: draft } });
+          const expDisc = data.discipline ? data.discipline.mtime : null;
+          const expUser = data.user ? data.user.mtime : null;
+          const expOver = data.override ? data.override.mtime : null;
+          if (seg === 'discipline') {
+            const body = { text: draft };
+            if (!force) body.expectedMtime = expDisc;
+            await api('discipline', { method: 'PUT', body });
+          } else if (seg === 'user') {
+            const body = { text: draft, enabled: data.user ? data.user.enabled : true };
+            if (!force) body.expectedMtime = expUser;
+            await api('user-prompt', { method: 'PUT', body });
+          } else if (seg === 'system') {
+            const body = { text: draft };
+            if (!force) body.expectedMtime = expOver;
+            await api('override', { method: 'PUT', body });
             await api('override/enable', { method: 'PUT', body: { enabled: true } });
           } else { return; }
           await load();
           setMsg({ title: '已保存', detail: '全局提示词已保存（快照＋落盘）；有会话级覆盖的会话不受影响。' });
-        } catch (e) { setErr('保存失败：' + String((e && e.message) || e)); }
+        } catch (e) {
+          if (e && e.status === 409 && !force) { setBusy(false); showConflict(e); return; }
+          setErr('保存失败：' + String((e && e.message) || e));
+        }
         finally { setBusy(false); }
       };
       const requestSaveSystem = () => {
@@ -498,6 +694,35 @@ window.__ModuleLoader__.load({
 
       const editable = seg === 'discipline' || seg === 'user';
       const overrideOn = !!(data.override && data.override.enabled);
+      // ── P1-3：全局导入/导出 ──
+      const buildGlobalExport = () => ({
+        format: 'dsh-custom/export',
+        version: 1,
+        scope: 'global',
+        exportedAt: new Date().toISOString(),
+        segments: {
+          discipline: data.discipline ? (data.discipline.sourceText || null) : null,
+          user: data.user && data.user.text ? data.user.text : null,
+          system: data.override && data.override.text ? data.override.text : null,
+        },
+      });
+      const applyGlobalImport = async (plan) => {
+        const steps = [];
+        if (plan.discipline) steps.push(() => api('discipline', { method: 'PUT', body: { text: plan.discipline.action === 'clear' ? '' : plan.discipline.text, expectedMtime: data.discipline ? data.discipline.mtime : null } }));
+        if (plan.user) steps.push(() => api('user-prompt', { method: 'PUT', body: { text: plan.user.action === 'clear' ? '' : plan.user.text, enabled: true, expectedMtime: data.user ? data.user.mtime : null } }));
+        if (plan.system) {
+          steps.push(() => api('override', { method: 'PUT', body: { text: plan.system.action === 'clear' ? '' : plan.system.text, expectedMtime: data.override ? data.override.mtime : null } }));
+          steps.push(() => api('override/enable', { method: 'PUT', body: { enabled: plan.system.action !== 'clear' } }));
+        }
+        for (let i = 0; i < steps.length; i++) {
+          try {
+            await steps[i]();
+          } catch (e) {
+            throw new Error('第 ' + String(i + 1) + ' / ' + String(steps.length) + ' 步失败（前 ' + String(i) + ' 步已写入）：' + String((e && e.message) || e));
+          }
+        }
+        await load();
+      };
       const restoreDefault = async () => {
         if (busy) return;
         setBusy(true);
@@ -511,8 +736,19 @@ window.__ModuleLoader__.load({
 
       return h('div', null,
         h(Modal, { open: modal !== null, title: modal ? modal.title : '', onClose: () => setModal(null), actions: modal ? modal.actions : null }, modal ? modal.body : null),
+        ioOpen ? h(ExportImportModal, {
+          scope: 'global',
+          sessionId: null,
+          title: '导入/导出（全局）',
+          hint: '导出＝把全局前置纪律/我的提示词/整段接管生成为 JSON；导入＝粘贴 JSON，预览后写入全局。不含渐进加载层各分节（请在渐进层页逐节导出/编辑）。',
+          buildExport: buildGlobalExport,
+          apply: applyGlobalImport,
+          onApplied: () => { setIoOpen(false); setMsg({ title: '导入完成', detail: '已按预览写入全局；有会话级覆盖的会话不受影响。' }); },
+          onClose: () => setIoOpen(false),
+        }) : null,
         h('div', { className: 'dshc_panel' },
           h('div', { className: 'dshc_ph' }, h('h3', null, '系统提示词管理（全局）'), h('span', { className: 'dshc_spacer' }),
+            h('button', { className: 'dshc_btn', disabled: busy, onClick: () => setIoOpen(true) }, '导入/导出'),
             editable ? h('button', { className: 'dshc_btn', 'data-primary': true, disabled: busy || !dirty, onClick: () => void save() }, busy ? '保存中…' : '保存') : null),
           h('div', { className: 'dshc_segs', role: 'tablist' },
             segDefs.map(([k, label]) => h('button', { key: k, role: 'tab', 'aria-selected': seg === k, 'data-active': seg === k, onClick: () => switchSeg(k) }, label))),
@@ -599,65 +835,106 @@ window.__ModuleLoader__.load({
     // ── ③ 快照与恢复 ──
     function SnapshotsPage() {
       const [entries, setEntries] = useState(null);
+      const [titles, setTitles] = useState({}); // sessionId(净化) → 标题（尽力而为，拿不到只影响显示）
       const [msg, setMsg] = useState(null);
       const [modal, setModal] = useState(null);
       const load = useCallback(async () => {
-        try { const v = await api('backups'); setEntries(v.entries || []); } catch (e) { setMsg({ title: '读取失败', detail: String((e && e.message) || e) }); }
+        try {
+          const v = await api('backups');
+          setEntries(v.entries || []);
+          try {
+            const s = await api('sessions');
+            const map = {};
+            (s.sessions || []).forEach((x) => { map[String(x.id).replace(/[^A-Za-z0-9_-]/g, '')] = x.title || null; });
+            setTitles(map);
+          } catch { /* 标题只是装饰 */ }
+        } catch (e) { setMsg({ title: '读取失败', detail: String((e && e.message) || e) }); }
       }, []);
       useEffect(() => { void load(); }, [load]);
-      const restore = async (name) => {
-        setModal(null);
-        try { await api('backups/restore', { method: 'PUT', body: { name } }); await load(); setMsg({ title: '已回滚', detail: '已回滚到 ' + name + '（回滚前已再快照）' }); }
-        catch (e) { setMsg({ title: '回滚失败', detail: String((e && e.message) || e) }); }
-      };
-      const showDetail = async (name, idx) => {
-        try {
-          const v = await api('backups/detail?name=' + encodeURIComponent(name));
-          const byFile = {};
-          (v.files || []).forEach((f) => { byFile[f.file] = f; });
-          const disc = byFile['discipline.md'];
-          const row = (title, desc) => h('li', { key: title, style: { fontSize: 12, margin: '4px 0' } },
-            h('b', null, title), ' —— ' + desc);
-          setModal({
-            title: '快照 #' + idx + ' · ' + fmtSnapDate(name),
-            body: h('div', null,
-              h('p', null, '这份快照记录了当时的提示词状态（回滚＝恢复到这份状态）：'),
-              h('ul', null,
-                disc ? row('纪律核心', disc.lines > 0 ? disc.lines + ' 行：' + disc.head : '空（当时使用运行时默认纪律）') : null,
-                byFile['override.md'] ? row('接管官方', byFile['override.md'].lines > 0 ? '已接管：' + byFile['override.md'].head : '空（未接管）') : null,
-                v.scope ? row('作用域规则', v.scope.count + ' 条' + (v.scope.paths.length ? '（针对 ' + v.scope.paths.join('、') + ' 等工作区）' : '')) : null,
-                v.settings ? row('注入与开关', Object.entries(v.settings).filter(([k]) => k !== 'version').map(([k, val]) => k + '=' + JSON.stringify(val)).join('，')) : null),
-              h('p', null, '提示：快照是「改提示词前」的自动备份——不确定回哪个时，先比对上面几条再决定。')),
-            actions: h('div', { className: 'dshc_row' },
-              h('button', { className: 'dshc_btn', 'data-danger': true, onClick: () => void restore(name) }, '回滚到此版本'),
-              h('button', { className: 'dshc_btn', onClick: () => setModal(null) }, '关闭')),
-          });
-        } catch (e) { setMsg({ title: '详情读取失败', detail: String((e && e.message) || e) }); }
-      };
       const fmtSnapDate = (name) => {
         const m = String(name).match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2})-(\d{2})/);
         return m ? `${m[2]}月${m[3]}日 ${m[4]}:${m[5]}` : name;
+      };
+      const sessionLabel = (b) => {
+        const short = String(b.sessionId || '').replace(/^session-/, '').slice(0, 8);
+        const title = titles[b.sessionId];
+        return short + (title ? ' · ' + title : '');
+      };
+      const scopeBody = (b) => (b.scope === 'session' && b.sessionId ? '&sessionId=' + encodeURIComponent(b.sessionId) : '');
+      const restore = async (b) => {
+        setModal(null);
+        try {
+          await api('backups/restore', { method: 'PUT', body: { name: b.name, scope: b.scope === 'session' ? 'session' : 'global', sessionId: b.sessionId || undefined } });
+          await load();
+          setMsg({ title: '已回滚', detail: '已回滚到 ' + fmtSnapDate(b.name) + '（回滚前已再快照，可反悔）' });
+        } catch (e) { setMsg({ title: '回滚失败', detail: String((e && e.message) || e) }); }
+      };
+      const showExport = async (b) => {
+        try {
+          const v = await api('backups/export?name=' + encodeURIComponent(b.name) + scopeBody(b));
+          const json = JSON.stringify(v, null, 2);
+          setModal({
+            title: '导出快照 · ' + fmtSnapDate(b.name),
+            body: h('div', null,
+              h('p', null, '这份快照的完整文件内容（JSON）。复制留档后可随时查阅；超过 2MB 的快照会提示先用详情比对。'),
+              h('textarea', { className: 'dshc_ta', readOnly: true, value: json, style: { minHeight: 200 } }),
+              h('div', { className: 'dshc_row' },
+                h('button', { className: 'dshc_btn', onClick: async () => { try { await navigator.clipboard.writeText(json); setMsg({ title: '已复制', detail: '快照 JSON 已复制到剪贴板' }); } catch { setMsg({ title: '复制失败', detail: '请手动全选文本框复制（Ctrl+A / Ctrl+C）' }); } } }, '复制到剪贴板'))),
+            actions: h('div', { className: 'dshc_row' }, h('button', { className: 'dshc_btn', onClick: () => setModal(null) }, '关闭')),
+          });
+        } catch (e) { setMsg({ title: '导出失败', detail: String((e && e.message) || e) }); }
+      };
+      const showDetail = async (b, idx) => {
+        try {
+          const v = await api('backups/detail?name=' + encodeURIComponent(b.name) + scopeBody(b));
+          const byFile = {};
+          (v.files || []).forEach((f) => { byFile[f.file] = f; });
+          const row = (title, desc) => h('li', { key: title, style: { fontSize: 12, margin: '4px 0' } }, h('b', null, title), ' —— ' + desc);
+          const segRow = (file, label) => byFile[file] ? row(label, byFile[file].lines > 0 ? byFile[file].lines + ' 行：' + byFile[file].head : '空（当时未设置该段）') : null;
+          const isSession = b.scope === 'session';
+          setModal({
+            title: '快照 #' + idx + ' · ' + fmtSnapDate(b.name) + (isSession ? '（会话）' : ''),
+            body: h('div', null,
+              h('p', null, isSession ? '这份会话快照记录了该会话当时的覆盖段（回滚＝恢复到这份状态）：' : '这份快照记录了当时的全局提示词状态（回滚＝恢复到这份状态）：'),
+              h('ul', null,
+                isSession
+                  ? [segRow('discipline.md', '前置纪律'), segRow('user.md', '我的提示词'), segRow('layered.md', '渐进加载层'), segRow('system.md', '整段接管')]
+                  : [byFile['discipline.md'] ? row('纪律核心', byFile['discipline.md'].lines > 0 ? byFile['discipline.md'].lines + ' 行：' + byFile['discipline.md'].head : '空（当时使用运行时默认纪律）') : null,
+                     byFile['user-prompt.md'] ? row('我的提示词', byFile['user-prompt.md'].lines > 0 ? byFile['user-prompt.md'].head : '空') : null,
+                     byFile['override.md'] ? row('接管官方', byFile['override.md'].lines > 0 ? '已接管：' + byFile['override.md'].head : '空（未接管）') : null,
+                     v.scope ? row('作用域规则', v.scope.count + ' 条' + (v.scope.paths.length ? '（针对 ' + v.scope.paths.join('、') + ' 等工作区）' : '')) : null,
+                     v.settings ? row('注入与开关', Object.entries(v.settings).filter(([k]) => k !== 'version').map(([k, val]) => k + '=' + JSON.stringify(val)).join('，')) : null]),
+              h('p', null, '提示：快照是「改提示词前」的自动备份——不确定回哪个时，先比对上面几条再决定。')),
+            actions: h('div', { className: 'dshc_row' },
+              h('button', { className: 'dshc_btn', onClick: () => void showExport(b) }, '导出 JSON'),
+              h('button', { className: 'dshc_btn', 'data-danger': true, onClick: () => void restore(b) }, '回滚到此版本'),
+              h('button', { className: 'dshc_btn', onClick: () => setModal(null) }, '关闭')),
+          });
+        } catch (e) { setMsg({ title: '详情读取失败', detail: String((e && e.message) || e) }); }
       };
       return h('div', null,
         h(Modal, { open: modal !== null, title: modal ? modal.title : '', onClose: () => setModal(null), actions: modal ? modal.actions : null }, modal ? modal.body : null),
         h('div', { className: 'dshc_panel' },
           h('div', { className: 'dshc_ph' }, h('h3', null, '快照与恢复'), h('span', { className: 'dshc_spacer' }),
-            h('span', { className: 'dshc_hint' }, '每次改提示词前的自动备份；不确定回哪个就先看详情')),
+            h('span', { className: 'dshc_hint' }, '全局＋各会话；每次改提示词前自动备份，保留最近 20 个（超出自动清理，重要状态可先导出 JSON）')),
           h('ul', { className: 'dshc_audit' },
             entries === null ? h('li', { className: 'dshc_empty' }, '读取中…')
               : entries.length === 0 ? h('li', { className: 'dshc_empty' }, '暂无快照——第一次在上方修改提示词时会自动生成')
-              : entries.map((b, i) => h('li', { key: b.name, style: { display: 'flex', alignItems: 'center', gap: 12, padding: '12px 0', borderBottom: '1px solid var(--dsw-alias-border-l2)' } },
+              : entries.map((b, i) => h('li', { key: (b.scope || 'global') + ':' + (b.sessionId || '') + ':' + b.name, style: { display: 'flex', alignItems: 'center', gap: 12, padding: '12px 0', borderBottom: '1px solid var(--dsw-alias-border-l2)' } },
                 h('div', { style: { flex: 1 } },
-                  h('div', { style: { fontWeight: 600, fontSize: 13 } }, '提示词备份 #' + (entries.length - i) + ' · ' + fmtSnapDate(b.name)),
-                  h('div', { className: 'dshc_hint', style: { marginTop: 3 } }, '包含 ' + (b.files || []).length + ' 个文件（纪律核心、开关状态等）')),
+                  h('div', { style: { fontWeight: 600, fontSize: 13 } },
+                    (b.scope === 'session' ? '会话快照 · ' + sessionLabel(b) : '全局备份') + ' · ' + fmtSnapDate(b.name)),
+                  h('div', { className: 'dshc_hint', style: { marginTop: 3 } }, '包含 ' + (b.files || []).length + ' 个文件' + (b.scope === 'session' ? '（该会话的覆盖段）' : '（纪律核心、开关状态等）'))),
                 h('span', null,
-                  h('button', { className: 'dshc_btn', onClick: () => void showDetail(b.name, entries.length - i) }, '详情'),
+                  h('button', { className: 'dshc_btn', onClick: () => void showDetail(b, entries.length - i) }, '详情'),
                   ' ',
                   h('button', { className: 'dshc_btn', onClick: () => setModal({
                     title: '回滚到 ' + fmtSnapDate(b.name) + '？',
-                    body: h('div', null, h('p', null, '把纪律核心、开关状态等恢复到 ' + fmtSnapDate(b.name) + ' 那一刻的样子。'), h('p', null, '回滚前会自动再快照当前状态，可反悔。')),
+                    body: h('div', null,
+                      h('p', null, b.scope === 'session' ? '把该会话的覆盖段恢复到 ' + fmtSnapDate(b.name) + ' 那一刻的样子。' : '把纪律核心、开关状态等恢复到 ' + fmtSnapDate(b.name) + ' 那一刻的样子。'),
+                      h('p', null, '回滚前会自动再快照当前状态，可反悔。')),
                     actions: h('div', { className: 'dshc_row' },
-                      h('button', { className: 'dshc_btn', 'data-danger': true, onClick: () => void restore(b.name) }, '确认回滚'),
+                      h('button', { className: 'dshc_btn', 'data-danger': true, onClick: () => void restore(b) }, '确认回滚'),
                       h('button', { className: 'dshc_btn', onClick: () => setModal(null) }, '取消')),
                   }) }, '回滚')))),
             msg ? h('li', { className: 'dshc_hint' }, msg.title + '：' + (msg.detail || '')) : null)));

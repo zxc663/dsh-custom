@@ -109,6 +109,7 @@ export interface StorageInfo {
 
 const SEED_FILES: Record<string, string> = {
   'discipline.md': '',
+  'user-prompt.md': '',
   'override.md': '',
   'scope.json': '{\n  "version": 1,\n  "rules": []\n}\n',
   'settings.json': '{\n  "version": 1,\n  "injectEnabled": true\n}\n',
@@ -117,7 +118,39 @@ const SEED_FILES: Record<string, string> = {
   'governance.json': '{\n  "version": 1\n}\n',
 }
 
-const TRACKED = ['discipline.md', 'override.md', 'scope.json', 'settings.json']
+// 2026-10-19 修复批：user-prompt.md 原漏出 TRACKED ⇒ 快照/外部改动/状态面都看不到「我的提示词」——
+// 快照跑在写 user-prompt 之前却复制不到它，回滚会丢这段。补齐。
+const TRACKED = ['discipline.md', 'user-prompt.md', 'override.md', 'scope.json', 'settings.json']
+
+// 快照保留策略（#决策 19：保留最近 N 个自动清理，默认 20）。
+const BACKUP_KEEP = 20
+const BACKUP_STAMP_RE = /^\d{4}-\d{2}-\d{2}T[0-9-]+Z?$/
+
+/**
+ * 按「保留最近 keep 个」清理一个快照目录（只认标准时间戳目录名；非标准名不动）。
+ * 名称=ISO 时间戳（冒号/点换连字符），字典序即时序，取新弃旧。
+ * @returns 被清理的目录名（供审计留痕）。
+ */
+export function pruneBackupDir(dir: string, keep: number): string[] {
+  let names: string[] = []
+  try {
+    names = readdirSync(dir).filter((n) => BACKUP_STAMP_RE.test(n))
+  } catch (e) {
+    const code = (e as { code?: unknown })?.code
+    if (code !== 'ENOENT') console.warn(`[dsh-custom] 快照清理扫描失败（${String(code ?? e)}）：${dir}`)
+    return []
+  }
+  const removed: string[] = []
+  for (const n of names.sort().reverse().slice(keep)) {
+    try {
+      rmSync(join(dir, n), { recursive: true, force: true })
+      removed.push(n)
+    } catch (e) {
+      console.warn(`[dsh-custom] 旧快照清理失败（${n}）：`, String((e as { message?: unknown })?.message ?? e))
+    }
+  }
+  return removed
+}
 
 export function ensureStorage(root: string): StorageInfo {
   const created: string[] = []
@@ -213,6 +246,8 @@ export function snapshot(root: string, reason: string): string {
     }
   }
   audit(root, { kind: 'snapshot', reason, dir, files: copied })
+  const pruned = pruneBackupDir(join(root, 'backups'), BACKUP_KEEP)
+  if (pruned.length > 0) audit(root, { kind: 'snapshot-pruned', removed: pruned, keep: BACKUP_KEEP })
   return dir
 }
 
@@ -871,9 +906,14 @@ export function listBackups(root: string): BackupEntry[] {
 
 /** 快照详情（P47 UX 批）：每个文件的字节/行数/前 120 字摘要＋settings 键值——让「回滚到哪个状态」可读。 */
 export interface BackupFileDetail { file: string; bytes: number; lines: number; head: string }
-export function backupDetail(root: string, name: string): { name: string; files: BackupFileDetail[]; settings: Record<string, unknown> | null; scope: { count: number; paths: string[] } | null } | null {
-  if (!/^[0-9A-Za-z._-]+$/.test(name)) return null
-  const dir = join(root, 'backups', name)
+export function backupDetail(root: string, name: string, sessionId: string | null = null): { name: string; files: BackupFileDetail[]; settings: Record<string, unknown> | null; scope: { count: number; paths: string[] } | null } | null {
+  if (!BACKUP_STAMP_RE.test(name) && !/^[0-9A-Za-z._-]+$/.test(name)) return null
+  let dir: string
+  if (sessionId !== null && sessionId !== '') {
+    try { dir = join(sessionDir(root, sessionId), 'backups', name) } catch { return null }
+  } else {
+    dir = join(root, 'backups', name)
+  }
   if (!existsSync(dir)) return null
   const files: BackupFileDetail[] = []
   let settings: Record<string, unknown> | null = null
@@ -915,6 +955,162 @@ export function restoreBackup(root: string, name: string): { restored: string[];
   return { restored, preRestoreSnapshot: pre }
 }
 
+// ── 快照时间线（P1-4，#决策 9/#19）：全局＋各会话快照合并列出；会话快照可详情/恢复/导出 ──
+export interface SnapshotEntry {
+  name: string
+  files: string[]
+  hasOverride: boolean
+  scope: 'global' | 'session'
+  sessionId: string | null
+}
+
+/** 合并列出全局与全部会话快照；按时间戳倒序（同刻全局在前，稳定）。 */
+export function listAllSnapshots(root: string): SnapshotEntry[] {
+  const out: SnapshotEntry[] = listBackups(root).map((e) => ({ ...e, scope: 'global' as const, sessionId: null }))
+  try {
+    const sroot = join(root, 'sessions')
+    for (const sid of readdirSync(sroot)) {
+      const bdir = join(sroot, sid, 'backups')
+      if (!existsSync(bdir)) continue
+      let names: string[] = []
+      try { names = readdirSync(bdir).filter((n) => BACKUP_STAMP_RE.test(n)) } catch { continue }
+      for (const name of names) {
+        let files: string[] = []
+        try { files = readdirSync(join(bdir, name)) } catch { continue }
+        out.push({ name, files, hasOverride: files.includes('system.md'), scope: 'session', sessionId: sid })
+      }
+    }
+  } catch { /* sessions/ 不存在＝没有会话级覆盖（常态），不算错误 */ }
+  return out.sort((x, y) => (x.name < y.name ? 1 : -1)).slice(0, 300)
+}
+
+/**
+ * 恢复会话快照（会话内时间线回滚）：快照=当时完整段集，恢复即「复制存在的段＋删除快照后新增的段」；
+ * 恢复前自动再快照当前状态（与全局 restoreBackup 同口径，可反悔）。
+ */
+export function restoreSessionBackup(root: string, id: string, name: string): { restored: string[]; preRestoreSnapshot: string | null } {
+  if (!BACKUP_STAMP_RE.test(name)) throw new Error('会话快照名称非法')
+  const dir = sessionDir(root, id)
+  const src = join(dir, 'backups', name)
+  if (!existsSync(src)) throw new Error('会话快照不存在')
+  const pre = snapshotSession(root, id)
+  const restored: string[] = []
+  for (const seg of SESSION_SEGMENTS) {
+    const p = join(dir, seg + '.md')
+    const s = join(src, seg + '.md')
+    if (existsSync(s)) {
+      copyFileSync(s, p)
+      forgetCachedFile(p)
+      restored.push(seg)
+    } else {
+      try { unlinkSync(p) } catch { /* 本就无该段文件 */ }
+      forgetCachedFile(p)
+    }
+  }
+  audit(root, { kind: 'session-backup-restored', session: id, name, restored, preRestoreSnapshot: pre })
+  return { restored, preRestoreSnapshot: pre }
+}
+
+/** 快照导出（保留策略的兜底：清理前可先导出 JSON 留档）；总量上限 2MB，超出拒绝（提示用详情页看）。 */
+export function snapshotExport(root: string, name: string, sessionId: string | null = null): { name: string; scope: 'global' | 'session'; sessionId: string | null; files: Record<string, string> } | null {
+  if (!BACKUP_STAMP_RE.test(name)) return null
+  let dir: string
+  if (sessionId !== null && sessionId !== '') {
+    try { dir = join(sessionDir(root, sessionId), 'backups', name) } catch { return null }
+  } else {
+    dir = join(root, 'backups', name)
+  }
+  if (!existsSync(dir)) return null
+  const files: Record<string, string> = {}
+  let total = 0
+  for (const f of readdirSync(dir)) {
+    if (!/^[0-9A-Za-z._-]+\.(md|json)$/.test(f)) continue
+    let text = ''
+    try { text = readFileSync(join(dir, f), 'utf8') } catch { continue }
+    total += Buffer.byteLength(text, 'utf8')
+    if (total > 2 * 1024 * 1024) return null
+    files[f] = text
+  }
+  return { name, scope: sessionId !== null && sessionId !== '' ? 'session' : 'global', sessionId, files }
+}
+
+// ── 会话对话（P1-3，#决策 13：只读；隐藏非对话条目并计数） ──
+export interface ConversationMessage { role: 'user' | 'assistant'; text: string; time: number | null; truncated?: boolean }
+export interface ConversationView { messages: ConversationMessage[]; hidden: number; omitted: number }
+const CONV_TEXT_CAP = 4000
+const CONV_MAX_MESSAGES = 300
+
+function conversationTextOf(message: unknown): string {
+  const blocks = (message as { content?: unknown })?.content
+  if (!Array.isArray(blocks)) return ''
+  const parts: string[] = []
+  for (const b of blocks) {
+    const block = b as { type?: unknown; text?: unknown }
+    if (block?.type === 'text' && typeof block.text === 'string' && block.text.length > 0) parts.push(block.text)
+  }
+  return parts.join('\n')
+}
+
+/**
+ * 纯折叠：会话事件 → 可读对话（user=source.kind 为 user 的真人消息；assistant=文本块）。
+ * 隐藏计数＝非对话条目（纪律/状态行/审批应答/系统提示词快照等注入件）；`omitted`＝超上限被省略的旧消息数。
+ */
+export function conversationViewOf(events: unknown[]): ConversationView {
+  const messages: ConversationMessage[] = []
+  let hidden = 0
+  for (const ev of events) {
+    if (ev === null || typeof ev !== 'object') continue
+    const type = (ev as { type?: unknown }).type
+    const data = ((ev as { data?: unknown }).data ?? {}) as Record<string, unknown>
+    const time = typeof (ev as { time?: unknown }).time === 'number' ? ((ev as { time?: number }).time ?? null) : null
+    if (type === 'user/message') {
+      const src = (data.source ?? {}) as { kind?: unknown }
+      if (src.kind === 'user') {
+        const raw = conversationTextOf(data)
+        if (raw.length > 0) messages.push(finishConversationMessage('user', raw, time))
+      } else {
+        hidden += 1
+      }
+    } else if (type === 'assistant/message') {
+      const raw = conversationTextOf(data.message)
+      if (raw.length > 0) messages.push(finishConversationMessage('assistant', raw, time))
+    } else if (type === 'system/message') {
+      hidden += 1
+    }
+  }
+  const omitted = Math.max(0, messages.length - CONV_MAX_MESSAGES)
+  return { messages: omitted > 0 ? messages.slice(omitted) : messages, hidden, omitted }
+}
+
+function finishConversationMessage(role: 'user' | 'assistant', raw: string, time: number | null): ConversationMessage {
+  if (raw.length > CONV_TEXT_CAP) return { role, text: raw.slice(0, CONV_TEXT_CAP), time, truncated: true }
+  return { role, text: raw, time }
+}
+
+// ── 乐观锁（P1-6，#决策 22）：写请求可带 expectedMtime；与当前不符→409，由用户决定刷新或覆盖 ──
+export class MtimeConflictError extends Error {
+  current: Record<string, string | null>
+  constructor(current: Record<string, string | null>, label: string) {
+    super(`${label} 已在别处被修改（当前版本与你的编辑基线不一致）`)
+    this.name = 'MtimeConflictError'
+    this.current = current
+  }
+}
+
+/**
+ * 文件 mtime（ISO）；不存在/不可读=null。
+ * 注意：必须与 readCachedFile/read* 的口径一致（new Date(mtimeMs)），不能直接用 stat.mtime——
+ * NTFS 亚毫秒时间下 stat.mtime(四舍五入) 与 new Date(mtimeMs)(截断) 会差 1ms，基线将永远对不上。
+ */
+export function mtimeOfFileOrNull(filePath: string): string | null {
+  try { return new Date(statSync(filePath).mtimeMs).toISOString() } catch { return null }
+}
+
+/** expected=undefined＝不检查（旧客户端兼容）；null＝期望文件不存在；字符串＝期望精确 mtime。 */
+export function mtimeMatches(filePath: string, expected: string | null): boolean {
+  return mtimeOfFileOrNull(filePath) === expected
+}
+
 // ── 会话级覆盖（页面重构）：每会话一目录，分段文件（discipline/user/layered/system），
 // 保存前自动快照到 sessions/<id>/backups/<ts>/；回滚两档（official=清空覆盖 / previous=恢复上一版）。
 // 优先级由注入层保证：会话级 > 全局；全局改不触碰 sessions/。
@@ -947,6 +1143,8 @@ function snapshotSession(root: string, id: string): string | null {
   for (const seg of files) {
     try { copyFileSync(join(dir, seg + '.md'), join(dest, seg + '.md')) } catch { /* 单段失败不阻塞 */ }
   }
+  const pruned = pruneBackupDir(join(dir, 'backups'), BACKUP_KEEP)
+  if (pruned.length > 0) audit(root, { kind: 'snapshot-pruned', session: id, removed: pruned, keep: BACKUP_KEEP })
   return stamp
 }
 
@@ -1539,7 +1737,24 @@ export function makeApi(
   const handlePut = (req: any, res: any, run: (body: Record<string, unknown>) => unknown): void => {
     readJsonBody(req)
       .then((body) => jsonResponse(res, 200, { ok: true, value: run(body) }))
-      .catch((e: unknown) => jsonResponse(res, 400, { ok: false, error: String((e as { message?: unknown })?.message ?? e) }))
+      .catch((e: unknown) => {
+        if (e instanceof MtimeConflictError) {
+          jsonResponse(res, 409, { ok: false, error: e.message, conflict: e.current })
+          return
+        }
+        jsonResponse(res, 400, { ok: false, error: String((e as { message?: unknown })?.message ?? e) })
+      })
+  }
+  /** P1-6 乐观锁守卫：body.expectedMtime 存在且与当前不符→抛 MtimeConflictError（所有写路径共用）。 */
+  const guardMtime = (body: Record<string, unknown>, filePath: string, label: string): void => {
+    const expected = body.expectedMtime
+    if (expected === undefined) return // 旧客户端兼容：不带基线＝不检查
+    if (expected === null) {
+      if (!mtimeMatches(filePath, null)) throw new MtimeConflictError({ [label]: mtimeOfFileOrNull(filePath) }, label)
+      return
+    }
+    if (typeof expected !== 'string') throw new Error('expectedMtime 必须是字符串或 null')
+    if (!mtimeMatches(filePath, expected)) throw new MtimeConflictError({ [label]: mtimeOfFileOrNull(filePath) }, label)
   }
   /** 会话级覆盖落盘后通知注入层重同步（未接线时静默跳过；失败只告警，不影响本次保存结果）。 */
   const notifySessionChanged = (id: string): void => {
@@ -1619,7 +1834,7 @@ export function makeApi(
             if (j.kind === 'external-change') externalChange += 1
           } catch { /* 坏行跳过，不阻塞统计 */ }
         }
-        const backups = listBackups(root)
+        const backups = listAllSnapshots(root)
         const sessions = agentsView?.list() ?? []
         jsonResponse(res, 200, {
           ok: true,
@@ -1636,13 +1851,41 @@ export function makeApi(
       }
       return
     }
+    // 会话对话（P1-3，#决策 13）：只读视图，过滤注入并给出隐藏计数
+    const sessionConvMatch = /^\/api\/dsh-custom\/sessions\/([^/]+)\/conversation$/.exec(pathname)
+    if (sessionConvMatch !== null) {
+      if (method !== 'GET') {
+        jsonResponse(res, 405, { ok: false, error: 'method not allowed' })
+        return
+      }
+      let csid = ''
+      try { csid = decodeURIComponent(sessionConvMatch[1]) } catch { csid = sessionConvMatch[1] }
+      const found = agentsView?.resolve(csid) ?? null
+      if (found === null) {
+        jsonResponse(res, 404, { ok: false, error: '会话不存在或未活跃（对话读取需要活跃会话）' })
+        return
+      }
+      try {
+        const session = (found.agent as { session?: unknown } | null)?.session as { snapshotEvents?: unknown } | undefined
+        const events = typeof session?.snapshotEvents === 'function' ? (session.snapshotEvents as () => unknown[])() : null
+        if (!Array.isArray(events)) throw new Error('该宿主的会话对象不提供事件读取')
+        jsonResponse(res, 200, { ok: true, value: conversationViewOf(events) })
+      } catch (e: unknown) {
+        jsonResponse(res, 500, { ok: false, error: String((e as { message?: unknown })?.message ?? e) })
+      }
+      return
+    }
     const sessionOverrideMatch = /^\/api\/dsh-custom\/sessions\/([^/]+)\/override$/.exec(pathname)
     if (sessionOverrideMatch !== null) {
       let sid = ''
       try { sid = decodeURIComponent(sessionOverrideMatch[1]) } catch { sid = sessionOverrideMatch[1] }
       if (method === 'GET') {
         try {
-          jsonResponse(res, 200, { ok: true, value: { segments: readSessionOverride(root, sid) } })
+          const segments = readSessionOverride(root, sid)
+          const mtimes: Record<string, string | null> = {}
+          const dir = sessionDir(root, sid)
+          for (const seg of SESSION_SEGMENTS) mtimes[seg] = mtimeOfFileOrNull(join(dir, seg + '.md'))
+          jsonResponse(res, 200, { ok: true, value: { segments, mtimes } })
         } catch (e: unknown) {
           jsonResponse(res, 400, { ok: false, error: String((e as { message?: unknown })?.message ?? e) })
         }
@@ -1650,7 +1893,26 @@ export function makeApi(
       }
       if (method === 'PUT') {
         handlePut(req, res, (body) => {
-          const result = writeSessionOverride(root, sid, (body.segments ?? {}) as Record<string, string | null>)
+          const segments = (body.segments ?? {}) as Record<string, string | null>
+          const expected = body.expectedMtimes
+          if (expected !== undefined) {
+            if (expected === null || typeof expected !== 'object') throw new Error('expectedMtimes 必须是对象')
+            const dir = sessionDir(root, sid)
+            const conflicts: Record<string, string | null> = {}
+            for (const seg of SESSION_SEGMENTS) {
+              if (!(seg in segments)) continue
+              const raw = (expected as Record<string, unknown>)[seg]
+              if (raw === undefined) continue
+              let exp: string | null
+              if (raw === null) exp = null
+              else if (typeof raw === 'string') exp = raw
+              else throw new Error(`expectedMtimes.${seg} 必须是字符串或 null`)
+              const p = join(dir, seg + '.md')
+              if (!mtimeMatches(p, exp)) conflicts[seg] = mtimeOfFileOrNull(p)
+            }
+            if (Object.keys(conflicts).length > 0) throw new MtimeConflictError(conflicts, '该会话的提示词段')
+          }
+          const result = writeSessionOverride(root, sid, segments)
           notifySessionChanged(sid)
           return result
         })
@@ -1695,6 +1957,7 @@ export function makeApi(
       if (method === 'PUT') {
         handlePut(req, res, (body) => {
           if (typeof body.text !== 'string') throw new Error('text 必须是字符串')
+          guardMtime(body, join(root, 'discipline.md'), '前置纪律')
           return saveDiscipline(root, body.text)
         })
         return
@@ -1734,6 +1997,7 @@ export function makeApi(
       if (method === 'PUT') {
         handlePut(req, res, (body) => {
           if (typeof body.text !== 'string') throw new Error('text 必须是字符串')
+          guardMtime(body, join(root, 'user-prompt.md'), '我的提示词')
           return saveUserPrompt(root, body.text, body.enabled !== false)
         })
         return
@@ -1834,7 +2098,8 @@ export function makeApi(
         return
       }
       const q = new URLSearchParams(String(req?.url ?? '').split('?')[1] ?? '')
-      const detail = backupDetail(root, q.get('name') ?? '')
+      const detailSession = q.get('sessionId') ?? ''
+      const detail = backupDetail(root, q.get('name') ?? '', detailSession.length > 0 ? detailSession : null)
       if (!detail) {
         jsonResponse(res, 404, { ok: false, error: '快照不存在或名称非法' })
         return
@@ -1888,6 +2153,7 @@ export function makeApi(
         readJsonBody(req)
           .then(async (body) => {
             if (typeof body.text !== 'string') throw new Error('text 必须是字符串')
+            guardMtime(body, join(root, 'override.md'), '整段接管文本')
             const asm = (await svc.assemble()) as { variables?: Record<string, unknown> } | null
             let render: ((a: unknown) => string) | null = null
             if (loader) {
@@ -1911,7 +2177,13 @@ export function makeApi(
             access()
             jsonResponse(res, 200, { ok: true, value: readOverride(root) })
           })
-          .catch((e: unknown) => jsonResponse(res, 400, { ok: false, error: String((e as { message?: unknown })?.message ?? e) }))
+          .catch((e: unknown) => {
+            if (e instanceof MtimeConflictError) {
+              jsonResponse(res, 409, { ok: false, error: e.message, conflict: e.current })
+              return
+            }
+            jsonResponse(res, 400, { ok: false, error: String((e as { message?: unknown })?.message ?? e) })
+          })
         return
       }
       jsonResponse(res, 405, { ok: false, error: 'method not allowed' })
@@ -1976,7 +2248,7 @@ export function makeApi(
         jsonResponse(res, 405, { ok: false, error: 'method not allowed' })
         return
       }
-      jsonResponse(res, 200, { ok: true, value: { entries: listBackups(root) } })
+      jsonResponse(res, 200, { ok: true, value: { entries: listAllSnapshots(root) } })
       return
     }
     if (pathname === '/api/dsh-custom/backups/restore') {
@@ -1986,10 +2258,33 @@ export function makeApi(
       }
       handlePut(req, res, (body) => {
         if (typeof body.name !== 'string') throw new Error('name 必须是字符串')
+        const sessionId = typeof body.sessionId === 'string' && body.sessionId.length > 0 ? body.sessionId : null
+        if (String(body.scope ?? 'global') === 'session') {
+          if (sessionId === null) throw new Error('会话快照恢复需要 sessionId')
+          const result = restoreSessionBackup(root, sessionId, body.name)
+          notifySessionChanged(sessionId)
+          access()
+          return result
+        }
         const result = restoreBackup(root, body.name)
         access()
         return result
       })
+      return
+    }
+    if (pathname === '/api/dsh-custom/backups/export') {
+      if (method !== 'GET') {
+        jsonResponse(res, 405, { ok: false, error: 'method not allowed' })
+        return
+      }
+      const q = new URLSearchParams(String(req?.url ?? '').split('?')[1] ?? '')
+      const sessionIdParam = q.get('sessionId') ?? ''
+      const data = snapshotExport(root, q.get('name') ?? '', sessionIdParam.length > 0 ? sessionIdParam : null)
+      if (!data) {
+        jsonResponse(res, 404, { ok: false, error: '快照不存在、名称非法或超出导出上限（2MB）' })
+        return
+      }
+      jsonResponse(res, 200, { ok: true, value: data })
       return
     }
     jsonResponse(res, 404, { ok: false, error: 'not found' })
