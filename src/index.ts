@@ -2064,15 +2064,69 @@ export function apply(ctx: any): () => void {
 
   // P1b：按 agent 作用域注册同名段（遮蔽全局；命中工作区规则即覆盖，cwd 实时读取 ⇒ 位置转移自动跟随）
   // 附：会话级视图数据源（agentsView，真实请求同法 assemble({agent, scope: agent})）
+  // 2026-10-19 P1-2：标题/模型改接宿主真源（0.2.1-rc.2 源码实证，与官方 api-session-controller 同法）——
+  //   title = sessionProjections.stateOf(s,'title') → sessionTitle.get(s).title → 旧 header.title；
+  //   model = sessionProjections.stateOf(s,'modelSelection').pending??lastUsed → session.requestHeader().config
+  //           → agentDefaultModel.currentSelection() → 旧 header.model。
+  // 每级来源独立降级（服务缺失/旧宿主/读取抛错都跳过该级），单会话读取失败不影响整表。
   let agentsRef: any = null
+  let sessionTitleRef: any = null
+  let sessionProjectionsRef: any = null
+  let agentDefaultModelRef: any = null
+  ctx.inject(['sessionTitle'], (c: any) => { sessionTitleRef = c.sessionTitle })
+  ctx.inject(['sessionProjections'], (c: any) => { sessionProjectionsRef = c.sessionProjections })
+  ctx.inject(['agentDefaultModel'], (c: any) => { agentDefaultModelRef = c.agentDefaultModel })
+
+  const routeLabelOf = (selection: any): string | null => {
+    const provider = typeof selection?.provider === 'string' ? selection.provider.trim() : ''
+    const model = typeof selection?.model === 'string' ? selection.model.trim() : ''
+    if (provider.length > 0 && model.length > 0) return provider + '/' + model
+    return model.length > 0 ? model : null
+  }
+  const agentModelLabelOf = (agent: any): string | null => {
+    const session = agent?.session
+    if (session !== null && session !== undefined) {
+      try {
+        const state = sessionProjectionsRef?.stateOf?.(session, 'modelSelection')
+        const picked = routeLabelOf(state?.pending ?? state?.lastUsed)
+        if (picked !== null) return picked
+      } catch { /* 投影不可用 → 下一级 */ }
+      try {
+        const logged = routeLabelOf(session?.requestHeader?.()?.config)
+        if (logged !== null) return logged
+      } catch { /* 无请求头（空白会话）→ 下一级 */ }
+    }
+    try {
+      const byDefault = routeLabelOf(agentDefaultModelRef?.currentSelection?.())
+      if (byDefault !== null) return byDefault
+    } catch { /* 默认模型服务不可用 → 下一级 */ }
+    const legacy = typeof agent?.session?.header?.model === 'string' ? agent.session.header.model : agent?.model
+    return typeof legacy === 'string' && legacy.trim().length > 0 ? legacy.trim() : null
+  }
+  const agentTitleOf = (agent: any): string | null => {
+    const session = agent?.session
+    if (session !== null && session !== undefined) {
+      try {
+        const projected = sessionProjectionsRef?.stateOf?.(session, 'title')
+        if (typeof projected === 'string' && projected.trim().length > 0) return projected.trim()
+      } catch { /* 投影不可用 → 下一级 */ }
+      try {
+        const snapshot = sessionTitleRef?.get?.(session)
+        const title = typeof snapshot === 'string' ? snapshot : snapshot?.title
+        if (typeof title === 'string' && title.trim().length > 0) return title.trim()
+      } catch { /* 标题服务不可用 → 下一级 */ }
+    }
+    const legacy = typeof agent?.session?.header?.title === 'string' ? agent.session.header.title : agent?.title
+    return typeof legacy === 'string' && legacy.trim().length > 0 ? legacy.trim() : null
+  }
   const agentsView: AgentsView = {
     list: () =>
       ((agentsRef?.list() ?? []) as any[])
         .map((a) => ({
           id: String(a?.id ?? ''),
           cwd: typeof a?.session?.header?.cwd === 'string' ? a.session.header.cwd : null,
-          model: typeof a?.session?.header?.model === 'string' ? a.session.header.model : (typeof a?.model === 'string' ? a.model : null),
-          title: typeof a?.session?.header?.title === 'string' ? a.session.header.title : (typeof a?.title === 'string' ? a.title : null),
+          model: agentModelLabelOf(a),
+          title: agentTitleOf(a),
         }))
         .filter((x) => x.id.length > 0),
     resolve: (id: string) => {
@@ -2081,8 +2135,8 @@ export function apply(ctx: any): () => void {
       return {
         agent,
         cwd: typeof agent?.session?.header?.cwd === 'string' ? agent.session.header.cwd : null,
-        model: typeof agent?.session?.header?.model === 'string' ? agent.session.header.model : (typeof agent?.model === 'string' ? agent.model : null),
-        title: typeof agent?.session?.header?.title === 'string' ? agent.session.header.title : (typeof agent?.title === 'string' ? agent.title : null),
+        model: agentModelLabelOf(agent),
+        title: agentTitleOf(agent),
       }
     },
   }
