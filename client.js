@@ -27,7 +27,7 @@ window.__ModuleLoader__.load({
       '.dshc_ph{display:flex;align-items:center;gap:10px;padding:11px 14px;border-bottom:1px solid var(--dsw-alias-border-l2)}',
       '.dshc_ph h3{margin:0;font-size:15px;white-space:nowrap;flex:none}',
       '.dshc_spacer{flex:1}',
-      '.dshc_btn{border:1px solid var(--dsw-alias-border-l2);background:0 0;color:var(--dsw-alias-label-primary);font:inherit;border-radius:8px;padding:6px 12px;cursor:pointer}',
+      '.dshc_btn{border:1px solid var(--dsw-alias-border-l2);background:0 0;color:var(--dsw-alias-label-primary);font:inherit;border-radius:8px;padding:6px 12px;cursor:pointer;white-space:nowrap}',
       '.dshc_btn:hover{background:var(--dsw-alias-bg-layer-2)}',
       '.dshc_btn:disabled{opacity:.55;cursor:default}',
       '.dshc_btn[data-primary=true]{background:var(--dsw-alias-brand-primary);border-color:var(--dsw-alias-brand-primary);color:#fff;font-weight:600}',
@@ -885,6 +885,7 @@ window.__ModuleLoader__.load({
       const [titles, setTitles] = useState({}); // sessionId(净化) → 标题（尽力而为，拿不到只影响显示）
       const [msg, setMsg] = useState(null);
       const [modal, setModal] = useState(null);
+      const [busy, setBusy] = useState(false);
       const load = useCallback(async () => {
         try {
           const v = await api('backups');
@@ -898,6 +899,15 @@ window.__ModuleLoader__.load({
         } catch (e) { setMsg({ title: '读取失败', detail: String((e && e.message) || e) }); }
       }, []);
       useEffect(() => { void load(); }, [load]);
+      const manualBackup = async () => {
+        setBusy(true);
+        try {
+          await api('backups', { method: 'POST', body: {} });
+          await load();
+          setMsg({ title: '已创建备份', detail: '当前状态已备份并列入下方列表。' });
+        } catch (e) { setMsg({ title: '备份失败', detail: String((e && e.message) || e) }); }
+        finally { setBusy(false); }
+      };
       const fmtSnapDate = (name) => {
         const m = String(name).match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2})-(\d{2})/);
         return m ? `${m[2]}月${m[3]}日 ${m[4]}:${m[5]}` : name;
@@ -963,7 +973,8 @@ window.__ModuleLoader__.load({
         h(Modal, { open: modal !== null, title: modal ? modal.title : '', onClose: () => setModal(null), actions: modal ? modal.actions : null }, modal ? modal.body : null),
         h('div', { className: 'dshc_panel' },
           h('div', { className: 'dshc_ph' }, h('h3', null, '快照与恢复'), h('span', { className: 'dshc_spacer' }),
-            h('span', { className: 'dshc_hint' }, '全局＋各会话；每次改提示词前自动备份，保留最近 20 个（超出自动清理，重要状态可先导出 JSON）')),
+            h('span', { className: 'dshc_hint' }, '全局＋各会话；每次改提示词前自动备份，保留最近 20 个（超出自动清理，重要状态可先导出 JSON）'),
+            h('button', { className: 'dshc_btn', disabled: busy, onClick: () => void manualBackup() }, busy ? '备份中…' : '立即备份')),
           h('ul', { className: 'dshc_audit' },
             entries === null ? h('li', { className: 'dshc_empty' }, '读取中…')
               : entries.length === 0 ? h('li', { className: 'dshc_empty' }, '暂无快照——第一次在上方修改提示词时会自动生成')

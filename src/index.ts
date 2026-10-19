@@ -2373,11 +2373,21 @@ export function makeApi(
       return
     }
     if (pathname === '/api/dsh-custom/backups') {
-      if (method !== 'GET') {
-        jsonResponse(res, 405, { ok: false, error: 'method not allowed' })
+      if (method === 'GET') {
+        jsonResponse(res, 200, { ok: true, value: { entries: listAllSnapshots(root) } })
         return
       }
-      jsonResponse(res, 200, { ok: true, value: { entries: listAllSnapshots(root) } })
+      if (method === 'POST') {
+        // 手动快照（2026-10-19 旅程补缺）：与自动快照同管道（审计/prune 一并生效）
+        try {
+          const dir = snapshot(root, 'manual')
+          jsonResponse(res, 200, { ok: true, value: { dir, entries: listAllSnapshots(root) } })
+        } catch (e) {
+          jsonResponse(res, 500, { ok: false, error: String((e as { message?: unknown })?.message ?? e) })
+        }
+        return
+      }
+      jsonResponse(res, 405, { ok: false, error: 'method not allowed' })
       return
     }
     if (pathname === '/api/dsh-custom/backups/restore') {
