@@ -786,7 +786,7 @@ window.__ModuleLoader__.load({
             h('button', { className: 'dshc_btn', disabled: busy, onClick: () => setIoOpen(true) }, '导入/导出'),
             editable ? h('button', { className: 'dshc_btn', 'data-primary': true, disabled: busy || !dirty, onClick: () => void save() }, busy ? '保存中…' : '保存') : null),
           h('div', { className: 'dshc_segs', role: 'tablist' },
-            segDefs.map(([k, label]) => h('button', { key: k, role: 'tab', 'aria-selected': seg === k, 'data-active': seg === k, onClick: () => switchSeg(k) }, label))),
+            segDefs.map(([k, label]) => h('button', { key: k, role: 'tab', title: { discipline: '追加在系统提示词最前面的补充要求（不替换纪律核心）', user: '你的个性化指令段（空＝不注入）', layered: '按需注入的流程分节——任务触发时才注入，用完即走', system: '高级：整段替换系统提示词（慎用）' }[k], 'aria-selected': seg === k, 'data-active': seg === k, onClick: () => switchSeg(k) }, label))),
           h('div', { className: 'dshc_body' },
             seg === 'system'
               ? h('div', null,
@@ -794,7 +794,7 @@ window.__ModuleLoader__.load({
                 h('div', { className: 'dshc_hint', style: { marginBottom: 6 } }, '① 已识别的官方提示词段（来自实际装配，只读' + (officialSecs.length ? '；' + officialSecs.length + ' 段：' + officialNames : '；装配暂无已识别官方面') + '）'),
                 h('textarea', { className: 'dshc_ta', readOnly: true, value: officialText || (overrideOn ? '（已接管：官方面被整段替换，装配里不再包含它）' : '（装配暂无已识别官方面内容）'), style: { minHeight: 120, marginBottom: 10 } }),
                 h('div', { className: 'dshc_banner', style: { margin: '0 0 10px' } }, '⚠ 整段接管会替换当前全部系统提示词段——包括官方段、运行时核心（shisanxinuo:core-discipline）与其它外部段，不只是上面这段官方原文。'),
-                h('div', { className: 'dshc_hint', style: { marginBottom: 6 } }, '② 接管草稿（保存＝整段替换；留空保存＝恢复官方原文，不会创建空提示词）'),
+                h('div', { className: 'dshc_hint', style: { marginBottom: 6 } }, '② 接管草稿（高级功能：保存后用这里的文本整段替换系统提示词；留空保存＝恢复官方原文），建议：除非确有需要，优先用「前置纪律」或「我的提示词」，不要整段接管。'),
                 h('textarea', { className: 'dshc_ta', value: draft, onChange: (e) => { const v = e.target.value; setDraft(v); setDirty(v !== baseline); }, placeholder: '未接管——此处为空时当前系统提示词生效；写内容保存即整段接管' }),
                 h('div', { className: 'dshc_row dshc_actions' },
                   h('button', { className: 'dshc_btn', 'data-primary': true, disabled: busy || !dirty, onClick: requestSaveSystem }, busy ? '保存中…' : '保存修改'),
@@ -870,10 +870,10 @@ window.__ModuleLoader__.load({
                     (data.layered && data.layered.sections && data.layered.sections.length === 0) ? h('div', { className: 'dshc_empty' }, '无分节') : null))
                   : h('div', null,
                     seg === 'discipline' ? h('div', null,
-                      h('div', { className: 'dshc_hint', style: { marginBottom: 6 } }, '① 实际生效的运行时核心（来源=运行时治理插件，只读' + (effDiscipline ? '；' + String(effDiscipline.text || '').length + ' 字' : '；装配暂未含该段') + '）——模型每回合看到的就是它：'),
+                      h('div', { className: 'dshc_hint', style: { marginBottom: 6 } }, '① 模型每回合都会看到的「纪律核心」正文（只读；来自运行时治理插件' + (effDiscipline ? '；' + String(effDiscipline.text || '').length + ' 字' : '；装配暂未含该段') + '）：'),
                       h('textarea', { className: 'dshc_ta', readOnly: true, value: (effDiscipline && effDiscipline.text) || '（装配暂未含运行时纪律段）', style: { minHeight: 140, marginBottom: 10 } }),
-                      h('div', { className: 'dshc_hint', style: { marginBottom: 6 } }, '② 前置纪律附加（默认空＝不附加；写内容保存后会在系统提示词最前面追加这段文本。注意：它不会替换上面的运行时核心，运行时核心仍会按 order=300 注入，两者会同时存在。）'))
-                      : h('div', { className: 'dshc_hint', style: { marginBottom: 6 } }, '我的提示词（用户自定义段；空＝不注入）'),
+                      h('div', { className: 'dshc_hint', style: { marginBottom: 6 } }, '② 前置纪律附加（可选；默认空＝不附加）。写什么：你希望模型永远先看到的补充要求（个人偏好、团队规范）。保存后：追加在系统提示词最前面。注意：它不替换①的纪律核心，两段会同时生效。'))
+                      : h('div', { className: 'dshc_hint', style: { marginBottom: 6 } }, '我的提示词（可选；空＝不注入）。写什么：你的个性化指令（语气、格式、习惯约定）。保存后：作为独立段注入，排在纪律核心之后。'),
                     h('textarea', { className: 'dshc_ta', value: draft, onChange: (e) => { const v = e.target.value; setDraft(v); setDirty(v !== baseline); }, placeholder: seg === 'discipline' ? '空＝不附加；此处不会替换运行时核心' : '空＝不注入该段' })),
             err ? h('div', { className: 'dshc_err' }, h('span', null, err)) : null,
             msg ? h('div', { className: 'dshc_hint', style: { marginTop: 8 } }, msg.title + '：' + (msg.detail || '')) : null)));
@@ -925,6 +925,14 @@ window.__ModuleLoader__.load({
           await load();
           setMsg({ title: '已回滚', detail: '已回滚到 ' + fmtSnapDate(b.name) + '（回滚前已再快照，可反悔）' });
         } catch (e) { setMsg({ title: '回滚失败', detail: String((e && e.message) || e) }); }
+      };
+      const delBackup = async (b) => {
+        try {
+          const scopeQ = b.scope === 'session' && b.sessionId ? '&scope=session&sessionId=' + encodeURIComponent(b.sessionId) : '';
+          await api('backups?name=' + encodeURIComponent(b.name) + scopeQ, { method: 'DELETE' });
+          await load();
+          setMsg({ title: '已删除', detail: '快照「' + fmtSnapDate(b.name) + '」已删除（不可恢复）' });
+        } catch (e) { setMsg({ title: '删除失败', detail: String((e && e.message) || e) }); }
       };
       const showExport = async (b) => {
         try {
@@ -985,6 +993,16 @@ window.__ModuleLoader__.load({
                   h('div', { className: 'dshc_hint', style: { marginTop: 3 } }, '包含 ' + (b.files || []).length + ' 个文件' + (b.scope === 'session' ? '（该会话的覆盖段）' : '（纪律核心、开关状态等）'))),
                 h('span', null,
                   h('button', { className: 'dshc_btn', onClick: () => void showDetail(b, entries.length - i) }, '详情'),
+                  ' ',
+                  h('button', { className: 'dshc_btn', 'data-softdanger': true, onClick: () => setModal({
+                    title: '删除这份快照？',
+                    body: h('div', null,
+                      h('p', null, '「' + ((b.scope === 'session' ? '会话快照 · ' + sessionLabel(b) : '全局备份') + ' · ' + fmtSnapDate(b.name)) + '」将被删除，删除后不可恢复。'),
+                      h('p', null, '如果只是想回到旧状态，请用「回滚」——回滚前会自动再快照，可反悔。')),
+                    actions: h('div', { className: 'dshc_row' },
+                      h('button', { className: 'dshc_btn', 'data-danger': true, onClick: () => { setModal(null); void delBackup(b); } }, '确认删除'),
+                      h('button', { className: 'dshc_btn', onClick: () => setModal(null) }, '取消')),
+                  }) }, '删除'),
                   ' ',
                   h('button', { className: 'dshc_btn', onClick: () => setModal({
                     title: '回滚到 ' + fmtSnapDate(b.name) + '？',
@@ -1181,7 +1199,7 @@ window.__ModuleLoader__.load({
               ? '域目录：来自运行时引擎上报（单一真源，引擎启动时更新）'
               : '域目录：内置镜像副本（引擎未上报目录；可能滞后于规则变更）'),
           gov.l3Enabled === false ? h('div', { className: 'dshc_banner' }, '⚠ L3 拦截已关闭：命中仅记录不弹卡，防线只剩宿主沙箱与提示词文本。') : null,
-          h('div', { className: 'dshc_trow' },
+          h('div', { className: 'dshc_trow', title: '总开关：一次关闭全部 10 个危险域的拦截（编码执行/解码执行固定开启，不受影响）。关闭后命中危险命令只记录、不弹审批卡。' },
             h('div', null,
               h('div', { className: 'dshc_tlabel' }, '总开关'),
               h('div', { className: 'dshc_hint' }, '10 个危险域词面判定（宿主沙箱之上的加严层），命中弹审批卡'),
@@ -1199,7 +1217,7 @@ window.__ModuleLoader__.load({
               });
             } })),
           h('div', { className: 'dshc_grid2c' },
-            gov.domains.map((d) => h('div', { key: d.domain, className: 'dshc_trow' },
+            gov.domains.map((d) => h('div', { key: d.domain, className: 'dshc_trow', title: d.noExempt ? d.domain + '：最高危入口，固定拦截、不可关闭' : d.domain + '：关闭后该域命令不再弹审批卡（仅记录）；再点开关恢复拦截' },
               h('div', { className: 'dshc_tlabel' }, d.domain, d.noExempt ? h('span', { className: 'dshc_tag' }, '固定开启') : null),
               h(Switch, { checked: !d.off, disabled: d.noExempt, locked: d.noExempt, busy, label: d.domain, onToggle: () => toggleDomain(d) })))),
           h('div', { className: 'dshc_hint', style: { padding: '4px 14px 10px' } }, '「不可豁免」的域（编码执行/解码执行）固定拦截——两个最高危入口，防误关双保险，不提供关闭开关；其余域可随时关。')),
@@ -1225,17 +1243,17 @@ window.__ModuleLoader__.load({
             h('div', { className: 'dshc_hint' }, '提示：可先在「统计数据 → 审计时间线」核对误拦记录，再按命令形态加白名单。'))),
         h('div', { className: 'dshc_panel' },
           h('div', { className: 'dshc_ph' }, h('h3', null, '工作流能力开关')),
-          h('div', { className: 'dshc_trow' },
+          h('div', { className: 'dshc_trow', title: '开启时：实质工作回合缺少状态行判级或验收登记会被自动打回纠正；关闭后不再打回（回到模型自觉）' },
             h('div', null,
               h('div', { className: 'dshc_tlabel' }, '判级与任务清单强制'),
               h('div', { className: 'dshc_hint' }, '实质工作回合缺状态行判级/验收登记时自动打回')),
             h(Switch, { checked: gov.levelChecklist, busy, label: '判级与任务清单强制', onToggle: (v) => void put({ levelChecklist: v }, v ? '判级强制已开启' : '判级强制已关闭') })),
-          h('div', { className: 'dshc_trow' },
+          h('div', { className: 'dshc_trow', title: '开启时：上下文被压缩后自动注入「重载序」提示，帮助模型恢复精度、长会话不跑偏' },
             h('div', null,
               h('div', { className: 'dshc_tlabel' }, '压缩重载信号'),
               h('div', { className: 'dshc_hint' }, '上下文压缩后注入重载序提示（保持长会话精度）')),
             h(Switch, { checked: gov.compactionSignal, busy, label: '压缩重载信号', onToggle: (v) => void put({ compactionSignal: v }, v ? '压缩信号已开启' : '压缩信号已关闭') })),
-          h('div', { className: 'dshc_trow' },
+          h('div', { className: 'dshc_trow', title: '排障专用：gate 通过后立即结束回合——可能吞掉交付文本、让最终回答到不了用户；改动需重启 DSH 生效' },
             h('div', null,
               h('div', { className: 'dshc_tlabel' }, '收口即终结（不推荐）',
                 (gov.boot && gov.concludeOnPass !== gov.boot.concludeOnPass) ? h('span', { className: 'dshc_tag' }, '待重启') : null),
@@ -1245,6 +1263,30 @@ window.__ModuleLoader__.load({
         h(Toast, { msg }));
     }
 
+    // ── ⑥ 关于（2026-10-19）──
+    function AboutPage() {
+      const [st, setSt] = useState(null);
+      useEffect(() => { void (async () => { try { setSt(await api('status')); } catch { setSt(null); } })(); }, []);
+      const repoAdmin = 'https://github.com/zxc663/dsh-custom';
+      const repoEngine = 'https://github.com/zxc663/shisan-xinuo-dsh-plugin';
+      const kv = (k, v) => h('div', { className: 'dshc_trow', style: { padding: '10px 0' } }, h('div', { className: 'dshc_tlabel' }, k), v);
+      return h('div', { className: 'dshc_panel' },
+        h('div', { className: 'dshc_ph' }, h('h3', null, '关于'), h('span', { className: 'dshc_spacer' }),
+          h('span', { className: 'dshc_hint' }, st && st.version ? '管理后台 v' + st.version : '')),
+        h('div', { className: 'dshc_body', style: { paddingTop: 12 } },
+          h('p', { style: { marginTop: 0, lineHeight: '22px' } },
+            '你好，我是 zxc663，欢迎使用我的插件。目前仍然处于最小基线状态，还有很多不完善之处——如果有改进建议，或是想对这个项目进行贡献，十分欢迎开 git 分支和提 issue。'),
+          kv('QQ 交流群', h('code', null, '1059212846')),
+          kv('邮箱反馈', h('code', null, '938566908@qq.com')),
+          kv('GitHub（管理后台）', h('a', { href: repoAdmin, target: '_blank', rel: 'noreferrer' }, repoAdmin)),
+          kv('GitHub（运行时引擎）', h('a', { href: repoEngine, target: '_blank', rel: 'noreferrer' }, repoEngine)),
+          h('div', { className: 'dshc_hint', style: { marginTop: 14, lineHeight: '21px' } },
+            h('div', { style: { fontWeight: 600, color: 'var(--dsw-alias-label-primary)', marginBottom: 4 } }, '卸载与还原'),
+            h('div', null, '卸载：从 DSH 配置档移除本插件即可（dsh plugin --profile <档> remove <包名>；运行时引擎同理）——你的配置数据保存在 $DSH_HOME/dsh-custom，不随卸载丢失。'),
+            h('div', null, '还原：重装后本页各功能直接读同一数据目录（快照/会话覆盖/全局文本自动回位）；也可在「快照与恢复」回滚，或先用「导入/导出」留一份 JSON。'),
+            st && st.root ? h('div', null, '当前数据目录：' + st.root) : null)))
+    }
+
     // ── 外壳 ──
     const PAGES = [
       ['sessions', '会话管理'],
@@ -1252,6 +1294,7 @@ window.__ModuleLoader__.load({
       ['snapshots', '快照与恢复'],
       ['stats', '统计数据'],
       ['governance', '治理开关'],
+      ['about', '关于'],
     ];
     function Tab() {
       const [page, setPage] = useState('sessions');
@@ -1287,6 +1330,7 @@ window.__ModuleLoader__.load({
           : page === 'prompts' ? h(PromptsPage, { onDirty: markDirty })
           : page === 'snapshots' ? h(SnapshotsPage)
           : page === 'stats' ? h(StatsPage)
+          : page === 'about' ? h(AboutPage)
           : h(GovernancePage),
         h(Toast, { msg: toastMsg }));
     }

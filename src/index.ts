@@ -1771,8 +1771,23 @@ export interface GuardStats {
   touched: number
 }
 
+// 本包版本（关于页展示用；读 package.json 一次并缓存）
+let cachedPluginVersion: string | null = null
+function readPluginVersion(): string {
+  if (cachedPluginVersion === null) {
+    try {
+      const pkg = JSON.parse(readFileSync(fileURLToPath(new URL('../package.json', import.meta.url)), 'utf8')) as { version?: unknown }
+      cachedPluginVersion = typeof pkg.version === 'string' ? pkg.version : ''
+    } catch {
+      cachedPluginVersion = ''
+    }
+  }
+  return cachedPluginVersion
+}
+
 export interface StatusView {
   root: string
+  version?: string
   files: Array<{ name: string; hash: string | null; mtime: string | null; bytes: number | null }>
   externalChanges: ExternalChange[]
   guard: GuardStats
@@ -1797,6 +1812,7 @@ export function collectStatus(root: string, stats: GuardStats): StatusView {
   })
   return {
     root,
+    version: readPluginVersion(),
     files,
     externalChanges: changes,
     guard: { denied: stats.denied, touched: stats.touched },
@@ -2382,6 +2398,34 @@ export function makeApi(
         try {
           const dir = snapshot(root, 'manual')
           jsonResponse(res, 200, { ok: true, value: { dir, entries: listAllSnapshots(root) } })
+        } catch (e) {
+          jsonResponse(res, 500, { ok: false, error: String((e as { message?: unknown })?.message ?? e) })
+        }
+        return
+      }
+      if (method === 'DELETE') {
+        // 单条快照删除（2026-10-19）：名字白名单＋存在性校验；审计 backup-deleted
+        const q = new URLSearchParams(String(req?.url ?? '').split('?')[1] ?? '')
+        const name = q.get('name') ?? ''
+        if (!/^[0-9A-Za-z._-]+$/.test(name)) {
+          jsonResponse(res, 400, { ok: false, error: '非法的快照名' })
+          return
+        }
+        const scope = q.get('scope') === 'session' ? 'session' : 'global'
+        const sid = q.get('sessionId') ?? ''
+        const dir = scope === 'session' ? (sid.length > 0 ? join(sessionDir(root, sid), 'backups', name) : '') : join(root, 'backups', name)
+        if (dir === '') {
+          jsonResponse(res, 400, { ok: false, error: '会话快照删除需要 sessionId' })
+          return
+        }
+        if (!existsSync(dir)) {
+          jsonResponse(res, 404, { ok: false, error: '快照不存在' })
+          return
+        }
+        try {
+          rmSync(dir, { recursive: true, force: true })
+          audit(root, { kind: 'backup-deleted', scope, name, ...(scope === 'session' ? { session: sid } : {}) })
+          jsonResponse(res, 200, { ok: true, value: { deleted: name, entries: listAllSnapshots(root) } })
         } catch (e) {
           jsonResponse(res, 500, { ok: false, error: String((e as { message?: unknown })?.message ?? e) })
         }

@@ -28,9 +28,22 @@ try {
   handler({ method: 'GET', url: '/api/dsh-custom/backups' }, mkRes())
   t('GET 列表=1（同管道可见）', captured !== null && captured.value && captured.value.entries.length === 1)
 
+  const firstName = captured !== null && captured.value && captured.value.entries[0] ? captured.value.entries[0].name : ''
   captured = null
-  handler({ method: 'DELETE', url: '/api/dsh-custom/backups' }, mkRes())
-  t('DELETE 405', captured !== null && captured.ok === false)
+  handler({ method: 'DELETE', url: '/api/dsh-custom/backups?name=' + encodeURIComponent(firstName) }, mkRes())
+  t('DELETE 条目 ok（列表减 1）', captured !== null && captured.ok === true && captured.value.entries.length === 0)
+
+  captured = null
+  handler({ method: 'DELETE', url: '/api/dsh-custom/backups?name=' + encodeURIComponent(firstName) }, mkRes())
+  t('DELETE 不存在 → 拒绝', captured !== null && captured.ok === false)
+
+  captured = null
+  handler({ method: 'DELETE', url: '/api/dsh-custom/backups?name=' + encodeURIComponent('../evil') }, mkRes())
+  t('DELETE 越界名 → 拒绝', captured !== null && captured.ok === false)
+
+  captured = null
+  handler({ method: 'PUT', url: '/api/dsh-custom/backups' }, mkRes())
+  t('PUT 未支持 → 拒绝', captured !== null && captured.ok === false)
 } finally {
   rmSync(root, { recursive: true, force: true })
 }
